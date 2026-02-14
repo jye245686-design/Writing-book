@@ -58,16 +58,17 @@ export default function Home() {
       ) : (
         <section className="card-flat p-6">
           <h2 className="text-lg font-medium text-gray-900 mb-2">我的项目</h2>
-          <p className="text-sm text-[var(--color-text-muted)] mb-4">
-            继续写之前的书，或新建一本。
-          </p>
           {loading ? (
-            <p className="text-sm text-[var(--color-text-muted)]">加载中…</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">加载中…</p>
           ) : listError ? (
-            <p className="text-sm text-[var(--color-text-muted)]">{listError}</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">{listError}</p>
           ) : projects.length === 0 ? (
-            <p className="text-sm text-[var(--color-text-muted)]">暂无项目，请先新建小说。</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-4">暂无项目，请先新建小说。</p>
           ) : (
+            <>
+              <p className="text-sm text-[var(--color-text-muted)] mb-4">
+                继续写之前的书，或新建一本。
+              </p>
             <ul className="space-y-2 mb-4">
               {projects.map((p) => (
                 <li key={p.id}>
@@ -83,6 +84,7 @@ export default function Home() {
                 </li>
               ))}
             </ul>
+            </>
           )}
           <Link to="/create" className="btn-flat btn-primary">
             新建小说

@@ -69,7 +69,7 @@ cd server && npm run test:api
 
 将依次校验：健康检查、创建项目、项目列表、锁定章节、导出接口。若全部通过会输出「自测通过」。
 
-**认证接口（用户功能阶段 1）**：`POST /api/auth/send-code`（body: `{ "phone": "13800138000" }`）、`POST /api/auth/login`（body: `{ "phone", "code" }`，返回 `{ user, token }`）、`GET /api/me`（Header: `Authorization: Bearer <token>`）。开发环境下验证码会打印在后端控制台。
+**认证**：当前为**用户 ID + 密码**注册与登录。`POST /api/auth/register`（body: `{ "userId", "password" }`）、`POST /api/auth/login`（body: `{ "userId", "password" }`，返回 `{ user, token }`）、`GET /api/me`（Header: `Authorization: Bearer <token>`）。短信登录（`send-code` + `login` 传 `phone`/`code`）已保留，待短信服务审核通过后可启用。
 
 ## 目录说明
 

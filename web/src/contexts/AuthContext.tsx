@@ -5,7 +5,10 @@ export const AUTH_TOKEN_KEY = 'auth_token'
 
 export interface AuthUser {
   id: string
-  phone: string
+  /** 用户自定义 ID（密码注册用户） */
+  userId?: string
+  /** 手机号（短信登录用户，后续开通短信用） */
+  phone?: string
 }
 
 interface AuthContextValue {
@@ -61,6 +64,14 @@ export function useAuth() {
   const ctx = useContext(AuthContext)
   if (!ctx) throw new Error('useAuth must be used within AuthProvider')
   return ctx
+}
+
+/** 展示用：优先 userId，否则手机号脱敏 */
+export function displayName(user: AuthUser | null): string {
+  if (!user) return ''
+  if (user.userId) return user.userId
+  if (user.phone) return maskPhone(user.phone)
+  return user.id.slice(0, 8) + '…'
 }
 
 /** 手机号脱敏：13800138000 -> 138****8000 */

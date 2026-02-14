@@ -6,7 +6,7 @@ import express from 'express'
 import cors from 'cors'
 import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, runConsistencyCheck, ALLOWED_MODELS } from './ai/deepseek.js'
 import { createProject, readProject, writeProject, listProjects } from './store/projects.js'
-import { sendVerificationCode, loginWithCode, requireAuth } from './auth.js'
+import { sendVerificationCode, loginWithCode, loginWithPassword, registerWithPassword, requireAuth } from './auth.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') })
@@ -21,25 +21,45 @@ app.get('/api/health', (req, res) => {
   res.json({ ok: true })
 })
 
-// ---------- 认证（手机号 + 验证码，阶段 1） ----------
-/** 发送验证码（开发环境验证码会打印到控制台） */
-app.post('/api/auth/send-code', (req, res) => {
+// ---------- 认证 ----------
+/** 注册：用户 ID + 密码，返回 { user, token } */
+app.post('/api/auth/register', (req, res) => {
+  const { userId, password } = req.body || {}
+  const result = registerWithPassword(userId, password)
+  if (result.error) {
+    return res.status(400).json({ error: result.error })
+  }
+  res.status(201).json(result)
+})
+
+/** 登录：支持 ① 用户 ID + 密码 ② 手机号 + 验证码（短信开通后使用），返回 { user, token } */
+app.post('/api/auth/login', (req, res) => {
+  const { userId, password, phone, code } = req.body || {}
+  if (userId !== undefined && userId !== '' && password !== undefined) {
+    const result = loginWithPassword(userId, password)
+    if (result.error) {
+      return res.status(401).json({ error: result.error })
+    }
+    return res.json(result)
+  }
+  if (phone !== undefined && code !== undefined) {
+    const result = loginWithCode(phone, code)
+    if (result.error) {
+      return res.status(401).json({ error: result.error })
+    }
+    return res.json(result)
+  }
+  return res.status(400).json({ error: '请使用用户 ID + 密码登录，或手机号 + 验证码登录' })
+})
+
+/** 发送验证码（短信服务开通后使用；已配置腾讯云短信则发真实短信） */
+app.post('/api/auth/send-code', async (req, res) => {
   const { phone } = req.body || {}
-  const result = sendVerificationCode(phone)
+  const result = await sendVerificationCode(phone)
   if (result.error) {
     return res.status(400).json({ error: result.error })
   }
   res.json({ success: true })
-})
-
-/** 手机号 + 验证码登录/注册，返回 { user, token } */
-app.post('/api/auth/login', (req, res) => {
-  const { phone, code } = req.body || {}
-  const result = loginWithCode(phone, code)
-  if (result.error) {
-    return res.status(401).json({ error: result.error })
-  }
-  res.json(result)
 })
 
 /** 获取当前登录用户（需携带 Authorization: Bearer <token>） */

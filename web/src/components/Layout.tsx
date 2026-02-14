@@ -1,5 +1,5 @@
 import { Link, Outlet } from 'react-router-dom'
-import { useAuth, maskPhone } from '../contexts/AuthContext'
+import { useAuth, displayName } from '../contexts/AuthContext'
 
 export default function Layout() {
   const { user, loading, logout } = useAuth()
@@ -16,8 +16,8 @@ export default function Layout() {
               <span className="text-sm text-[var(--color-text-muted)]">加载中…</span>
             ) : user ? (
               <>
-                <span className="text-sm text-gray-600" title={user.phone}>
-                  {maskPhone(user.phone)}
+                <span className="text-sm text-gray-600" title={user.userId || user.phone || ''}>
+                  {displayName(user)}
                 </span>
                 <button
                   type="button"
