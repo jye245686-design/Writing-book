@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useLocation, useNavigate } from 'react-router-dom'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { fetchWithRetry } from '../utils/fetchWithRetry'
 import { apiUrl, getAuthHeaders } from '../utils/api'
 import type { SettingState } from './CreateTitle'
@@ -29,13 +29,20 @@ interface OutlineLocationState {
 
 const BATCH_THRESHOLD = 12 // 超过此章节数时使用分批生成，避免单次请求过慢
 const BATCH_SIZE = 10
+const PREVIOUS_CHAPTERS_FOR_CONTINUITY = 15 // 继续生成时传入前文大纲的章数，保持一致性
 const LARGE_CHAPTER_THRESHOLD = 100 // 超过此章数时：生成前二次确认、列表分页展示
 const OUTLINE_PAGE_SIZE = 50
 
 export default function CreateOutline() {
   const location = useLocation()
   const navigate = useNavigate()
-  const state = location.state as OutlineLocationState | null
+  const { projectId: projectIdParam } = useParams()
+  const projectIdFromUrl = projectIdParam ?? null
+  const locationState = location.state as OutlineLocationState | null
+
+  const [resolvedState, setResolvedState] = useState<OutlineLocationState | null>(() => locationState)
+  const [loadingProject, setLoadingProject] = useState(!!projectIdFromUrl && !locationState?.setting)
+  const state = resolvedState ?? locationState
 
   const [totalChapters, setTotalChapters] = useState(30)
   const [outline, setOutline] = useState<OutlineState | null>(() => (state as OutlineLocationState & { outline?: OutlineState })?.outline ?? null)
@@ -43,6 +50,90 @@ export default function CreateOutline() {
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [outlinePage, setOutlinePage] = useState(0)
+  const saveOutlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const projectId = projectIdFromUrl || state?.projectId
+
+  // 从 URL projectId 加载项目（如刷新或从「我的项目」进入）
+  useEffect(() => {
+    if (!projectIdFromUrl || locationState?.setting) {
+      if (projectIdFromUrl && locationState?.setting) setLoadingProject(false)
+      return
+    }
+    let cancelled = false
+    fetchWithRetry(apiUrl(`/api/projects/${projectIdFromUrl}`), { headers: getAuthHeaders() })
+      .then((res) => {
+        if (cancelled || !res.ok) return res.ok ? res.json() : null
+        return res.json()
+      })
+      .then((data) => {
+        if (cancelled || !data) return
+        setResolvedState({
+          setting: data.setting ?? { worldBackground: '', genre: '', coreIdea: '' },
+          title: data.title ?? '',
+          oneLinePromise: data.oneLinePromise ?? '',
+          characters: data.characters ?? [],
+          outline: data.outline?.chapters?.length ? data.outline : undefined,
+          projectId: data.id,
+        })
+        if (data.outline?.chapters?.length) {
+          setOutline(data.outline)
+          setTotalChapters(data.outline.totalChapters ?? data.outline.chapters.length)
+        } else if (data.outline?.totalChapters) {
+          setTotalChapters(data.outline.totalChapters)
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoadingProject(false)
+      })
+    return () => { cancelled = true }
+  }, [projectIdFromUrl, locationState?.setting])
+
+  // 若 state 中已有 projectId 但 URL 没有，则同步到 URL（便于刷新后仍能加载）
+  useEffect(() => {
+    if (state?.projectId && !projectIdFromUrl) {
+      navigate(`/create/outline/${state.projectId}`, { replace: true, state })
+      return
+    }
+  }, [state?.projectId, projectIdFromUrl, navigate, state])
+
+  // 进入大纲页时若无项目则创建草稿并跳转到带 projectId 的 URL，便于保存与中途离开后继续
+  useEffect(() => {
+    if (!state?.setting || projectIdFromUrl || state.projectId) return
+    let cancelled = false
+    setLoadingProject(true)
+    fetchWithRetry(apiUrl('/api/projects'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      body: JSON.stringify({
+        setting: state.setting,
+        title: state.title,
+        oneLinePromise: state.oneLinePromise ?? '',
+        characters: state.characters ?? [],
+        outline: { totalChapters, chapters: [] },
+      }),
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.id) return
+        const id = data.id
+        setResolvedState((prev) => (prev ? { ...prev, projectId: id } : prev))
+        navigate(`/create/outline/${id}`, { replace: true, state: { ...state, projectId: id } })
+      })
+      .catch(() => setError('创建项目失败，请重试'))
+      .finally(() => {
+        if (!cancelled) setLoadingProject(false)
+      })
+    return () => { cancelled = true }
+  }, [state?.setting, state?.title, state?.oneLinePromise, state?.characters, projectIdFromUrl, state?.projectId])
+
+  if (loadingProject && !state) {
+    return (
+      <div className="flex items-center justify-center py-12 text-[var(--color-text-muted)]">
+        加载项目中…
+      </div>
+    )
+  }
 
   if (!state) {
     return (
@@ -65,6 +156,38 @@ export default function CreateOutline() {
       characters: state.characters ?? [],
     }
 
+  /** 执行分批生成：从 initialAccumulated 之后继续，直到 totalChapters；失败时保留已生成部分并抛错 */
+  const runBatchGeneration = async (initialAccumulated: OutlineChapter[]) => {
+    const accumulated = [...initialAccumulated]
+    for (let start = accumulated.length + 1; start <= totalChapters; start += BATCH_SIZE) {
+      const end = Math.min(start + BATCH_SIZE - 1, totalChapters)
+      setProgress({ done: accumulated.length, total: totalChapters })
+      const previousChapters = accumulated.slice(-PREVIOUS_CHAPTERS_FOR_CONTINUITY).map((ch) => ({
+        chapterIndex: ch.chapterIndex,
+        title: ch.title,
+        goal: ch.goal,
+      }))
+      const res = await fetchWithRetry(apiUrl('/api/ai/outline/generate-batch'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...basePayload,
+          startChapterIndex: start,
+          endChapterIndex: end,
+          previousChapters,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`)
+      const batch = (data.chapters || []) as OutlineChapter[]
+      accumulated.push(...batch)
+      const newOutline = { totalChapters, chapters: [...accumulated] }
+      setOutline(newOutline)
+      if (projectId) saveOutlineToProject(projectId, newOutline)
+      setProgress({ done: accumulated.length, total: totalChapters })
+    }
+  }
+
   const handleGenerate = async () => {
     if (totalChapters > LARGE_CHAPTER_THRESHOLD) {
       const ok = window.confirm(
@@ -84,34 +207,11 @@ export default function CreateOutline() {
         })
         const data = await res.json().catch(() => ({}))
         if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`)
-        setOutline({ totalChapters: data.totalChapters, chapters: data.chapters || [] })
+        const newOutline = { totalChapters: data.totalChapters, chapters: data.chapters || [] }
+        setOutline(newOutline)
+        if (projectId) saveOutlineToProject(projectId, newOutline)
       } else {
-        const accumulated: OutlineChapter[] = []
-        for (let start = 1; start <= totalChapters; start += BATCH_SIZE) {
-          const end = Math.min(start + BATCH_SIZE - 1, totalChapters)
-          setProgress({ done: accumulated.length, total: totalChapters })
-          const previousChapters = accumulated.slice(-5).map((ch) => ({
-            chapterIndex: ch.chapterIndex,
-            title: ch.title,
-            goal: ch.goal,
-          }))
-          const res = await fetchWithRetry(apiUrl('/api/ai/outline/generate-batch'), {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              ...basePayload,
-              startChapterIndex: start,
-              endChapterIndex: end,
-              previousChapters,
-            }),
-          })
-          const data = await res.json().catch(() => ({}))
-          if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`)
-          const batch = (data.chapters || []) as OutlineChapter[]
-          accumulated.push(...batch)
-          setOutline({ totalChapters, chapters: [...accumulated] })
-          setProgress({ done: accumulated.length, total: totalChapters })
-        }
+        await runBatchGeneration([])
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : '生成大纲失败，请重试')
@@ -121,43 +221,59 @@ export default function CreateOutline() {
     }
   }
 
+  /** 失败后点击「重试继续」：基于当前已生成的大纲与设定，从下一批继续生成 */
+  const handleRetryContinue = async () => {
+    if (!outline || outline.chapters.length >= totalChapters) return
+    setLoading(true)
+    setError(null)
+    setProgress(null)
+    try {
+      await runBatchGeneration(outline.chapters)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '继续生成失败，可再次点击重试继续')
+    } finally {
+      setLoading(false)
+      setProgress(null)
+    }
+  }
+
+  const saveOutlineToProject = useCallback(
+    (pid: string, outlineData: OutlineState) => {
+      fetchWithRetry(apiUrl(`/api/projects/${pid}`), {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          outline: { totalChapters: outlineData.totalChapters, chapters: outlineData.chapters },
+        }),
+      }).catch(() => {})
+    },
+    []
+  )
+
   const updateChapter = (index: number, field: keyof OutlineChapter, value: string | string[]) => {
     if (!outline) return
     const next = outline.chapters.map((ch) =>
       ch.chapterIndex === index ? { ...ch, [field]: value } : ch
     )
-    setOutline({ ...outline, chapters: next })
-  }
-
-  const handleConfirm = async () => {
-    if (!outline || outline.chapters.length === 0) return
-    setLoading(true)
-    setError(null)
-    try {
-      const res = await fetchWithRetry(apiUrl('/api/projects'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-        body: JSON.stringify({
-          setting: state.setting,
-          title: state.title,
-          oneLinePromise: state.oneLinePromise ?? '',
-          characters: state.characters ?? [],
-          outline: { totalChapters: outline.totalChapters, chapters: outline.chapters },
-        }),
-      })
-      const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`)
-      const projectId = data.id
-      if (!projectId) throw new Error('未返回项目 ID')
-      navigate(`/create/writing/${projectId}`)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '创建项目失败，请重试')
-    } finally {
-      setLoading(false)
+    const nextOutline = { ...outline, chapters: next }
+    setOutline(nextOutline)
+    if (projectId) {
+      if (saveOutlineTimerRef.current) clearTimeout(saveOutlineTimerRef.current)
+      saveOutlineTimerRef.current = setTimeout(() => {
+        saveOutlineTimerRef.current = null
+        saveOutlineToProject(projectId, nextOutline)
+      }, 800)
     }
   }
 
-  const projectId = state.projectId
+  const handleConfirm = () => {
+    if (!outline || outline.chapters.length === 0) return
+    if (projectId) {
+      navigate(`/create/writing/${projectId}`)
+    } else {
+      setError('项目未就绪，请稍候或刷新后重试')
+    }
+  }
 
   return (
     <div className="space-y-8">
@@ -227,7 +343,22 @@ export default function CreateOutline() {
             </div>
           </div>
         )}
-        {error && <p className="text-sm text-red-600">{error}</p>}
+        {error && (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm text-red-600">{error}</p>
+            {outline && outline.chapters.length > 0 && outline.chapters.length < totalChapters && (
+              <button
+                type="button"
+                onClick={handleRetryContinue}
+                disabled={loading}
+                className="btn-flat btn-primary text-sm"
+                title={`从第 ${outline.chapters.length + 1} 章起继续，将根据前 ${Math.min(PREVIOUS_CHAPTERS_FOR_CONTINUITY, outline.chapters.length)} 章大纲与设定续写`}
+              >
+                重试继续（已生成 {outline.chapters.length}/{totalChapters} 章）
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {outline && outline.chapters.length > 0 && (

@@ -19,10 +19,10 @@ export function getAuthHeaders(): Record<string, string> {
   return { Authorization: `Bearer ${token}` }
 }
 
-/** 拼接 API 完整 URL，保证 path 以 / 开头且 base 末尾无斜杠，避免 404 */
+/** 拼接 API 完整 URL，保证 path 以 / 开头且 base 末尾无斜杠，避免出现 //api 导致代理不匹配、404 */
 export function apiUrl(path: string): string {
   const base = getApiBase() || (typeof window !== 'undefined' ? window.location.origin : '')
   const normalizedPath = path.startsWith('/') ? path : `/${path}`
-  if (!base) return normalizedPath
+  if (!base) return (normalizedPath === '/' || path === '') ? '' : normalizedPath
   return base.replace(/\/$/, '') + normalizedPath
 }

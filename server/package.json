@@ -12,6 +12,7 @@
     "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "jsonwebtoken": "^9.0.2",
+    "mysql2": "^3.17.1",
     "tencentcloud-sdk-nodejs": "^4.1.186"
   }
 }

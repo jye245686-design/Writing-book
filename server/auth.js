@@ -32,7 +32,7 @@ function verifyPassword(password, stored) {
  * @returns {Promise<{ success: true } | { error: string }>}
  */
 export async function sendVerificationCode(phone) {
-  const result = createCode(phone)
+  const result = await createCode(phone)
   if (result.error) return result
 
   const smsResult = await sendVerificationSms(phone, result.code)
@@ -51,11 +51,11 @@ export async function sendVerificationCode(phone) {
  * @param {string} password
  * @returns {{ user: object, token: string } | { error: string }}
  */
-export function registerWithPassword(userId, password) {
+export async function registerWithPassword(userId, password) {
   if (!password || typeof password !== 'string') return { error: '请设置密码' }
   if (password.length < 6) return { error: '密码至少 6 位' }
   const hashed = hashPassword(password)
-  const result = createUserWithPassword(userId.trim(), hashed)
+  const result = await createUserWithPassword(userId.trim(), hashed)
   if (result.error) return { error: result.error }
   const user = result.user
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
@@ -71,9 +71,9 @@ export function registerWithPassword(userId, password) {
  * @param {string} password
  * @returns {{ user: object, token: string } | { error: string }}
  */
-export function loginWithPassword(userId, password) {
+export async function loginWithPassword(userId, password) {
   if (!userId || !password) return { error: '请输入用户 ID 和密码' }
-  const user = findUserByUserId(userId.trim())
+  const user = await findUserByUserId(userId.trim())
   if (!user || !user.passwordHash) return { error: '用户 ID 或密码错误' }
   if (!verifyPassword(password, user.passwordHash)) return { error: '用户 ID 或密码错误' }
   const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN })
@@ -89,10 +89,11 @@ export function loginWithPassword(userId, password) {
  * @param {string} code
  * @returns {{ user: object, token: string } | { error: string }}
  */
-export function loginWithCode(phone, code) {
+export async function loginWithCode(phone, code) {
   if (!phone || !code) return { error: '请提供手机号和验证码' }
-  if (!verifyCode(phone, code)) return { error: '验证码错误或已过期' }
-  const user = createUserByPhone(phone)
+  const ok = await verifyCode(phone, code)
+  if (!ok) return { error: '验证码错误或已过期' }
+  const user = await createUserByPhone(phone)
   const token = jwt.sign(
     { userId: user.id },
     JWT_SECRET,
@@ -110,7 +111,7 @@ export function loginWithCode(phone, code) {
  * @param {import('express').Response} res
  * @param {import('express').NextFunction} next
  */
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const raw = req.headers.authorization
   const token = raw && raw.startsWith('Bearer ') ? raw.slice(7).trim() : null
   if (!token) {
@@ -118,21 +119,21 @@ export function requireAuth(req, res, next) {
   }
   try {
     const payload = jwt.verify(token, JWT_SECRET)
-    const user = getUserById(payload.userId)
+    const user = await getUserById(payload.userId)
     if (!user) {
       return res.status(401).json({ error: '用户不存在或已失效' })
     }
     req.user = { id: user.id, phone: user.phone, userId: user.userId }
     next()
   } catch (err) {
-    return res.status(401).json({ error: '未登录或登录已过期' })
+    res.status(401).json({ error: '未登录或登录已过期' })
   }
 }
 
 /**
  * 可选鉴权：有 token 则解析并设置 req.user，无 token 不报错（用于后续按需限制）
  */
-export function optionalAuth(req, res, next) {
+export async function optionalAuth(req, res, next) {
   const raw = req.headers.authorization
   const token = raw && raw.startsWith('Bearer ') ? raw.slice(7).trim() : null
   if (!token) {
@@ -141,7 +142,7 @@ export function optionalAuth(req, res, next) {
   }
   try {
     const payload = jwt.verify(token, JWT_SECRET)
-    const user = getUserById(payload.userId)
+    const user = await getUserById(payload.userId)
     req.user = user ? { id: user.id, phone: user.phone, userId: user.userId } : null
   } catch {
     req.user = null

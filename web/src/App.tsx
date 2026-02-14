@@ -24,6 +24,7 @@ function App() {
           <Route path="create/title" element={<RequireAuth><CreateTitle /></RequireAuth>} />
           <Route path="create/characters" element={<RequireAuth><CreateCharacters /></RequireAuth>} />
           <Route path="create/outline" element={<RequireAuth><CreateOutline /></RequireAuth>} />
+          <Route path="create/outline/:projectId" element={<RequireAuth><CreateOutline /></RequireAuth>} />
           <Route path="create/writing/:projectId" element={<RequireAuth><CreateWriting /></RequireAuth>} />
           <Route path="create/writing" element={<RequireAuth><CreateWriting /></RequireAuth>} />
         </Route>

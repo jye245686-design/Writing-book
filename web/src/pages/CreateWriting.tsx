@@ -347,7 +347,7 @@ export default function CreateWriting() {
     return (
       <div className="space-y-6">
         <p className="text-red-600">{loadError ?? '项目不存在'}</p>
-        <Link to="/create/outline" className="btn-flat btn-primary">
+        <Link to={projectId ? `/create/outline/${projectId}` : '/create/outline'} className="btn-flat btn-primary">
           去生成大纲
         </Link>
       </div>
@@ -356,6 +356,17 @@ export default function CreateWriting() {
 
   const outline = project.outline
   const chapters = outline?.chapters ?? []
+
+  if (chapters.length === 0) {
+    return (
+      <div className="space-y-6">
+        <p className="text-[var(--color-text-muted)]">本书尚未生成大纲，请先完成大纲后再按章写作。</p>
+        <Link to={`/create/outline/${project.id}`} className="btn-flat btn-primary">
+          去生成 / 编辑大纲
+        </Link>
+      </div>
+    )
+  }
   const isLargeChapterCount = chapters.length > LARGE_CHAPTER_THRESHOLD
   const expandedChapter =
     isLargeChapterCount && expandedChapterIndex != null
@@ -377,15 +388,7 @@ export default function CreateWriting() {
       <div>
         <div className="flex flex-wrap items-center gap-3">
           <Link
-            to="/create/outline"
-            state={{
-              setting: project.setting,
-              title: project.title,
-              oneLinePromise: project.oneLinePromise,
-              characters: project.characters,
-              outline: project.outline,
-              projectId: project.id,
-            }}
+            to={`/create/outline/${project.id}`}
             className="text-sm text-[var(--color-text-muted)] hover:text-gray-900"
           >
             ← 返回大纲

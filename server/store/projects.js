@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
+import { getPool } from '../db-mysql.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = path.resolve(__dirname, '..', 'data', 'projects')
@@ -18,55 +19,65 @@ function projectPath(id) {
 
 /**
  * @typedef {Object} Project
- * @property {string} id
- * @property {string} [userId] - 所属用户 id，无则视为旧数据（列表按用户过滤时不展示）
- * @property {string} createdAt
- * @property {string} updatedAt
- * @property {{ worldBackground: string, genre: string, coreIdea: string }} setting
- * @property {string} title
- * @property {string} oneLinePromise
- * @property {Array} characters
- * @property {{ totalChapters: number, chapters: Array }} outline
- * @property {Record<string, { content: string, wordCount: number, status: string, summary?: string }>} chapters
- * @property {{ projectId: string, checkedAt: string, issues: Array<{ type: string, severity: string, chapterIndex: number, message: string, suggestion?: string }>, status: string }} [consistencyReport]
  */
 
-/**
- * @param {string} id
- * @returns {Project | null}
- */
-export function readProject(id) {
+export async function readProject(id) {
   if (!id || typeof id !== 'string') return null
+  const pool = await getPool()
+  if (pool) {
+    const [rows] = await pool.query('SELECT data FROM projects WHERE id = ? LIMIT 1', [id])
+    const row = rows[0]
+    if (!row) return null
+    return typeof row.data === 'string' ? JSON.parse(row.data) : row.data
+  }
   ensureDataDir()
   const file = projectPath(id)
   if (!fs.existsSync(file)) return null
   try {
     const raw = fs.readFileSync(file, 'utf8')
-    const data = JSON.parse(raw)
-    return data
+    return JSON.parse(raw)
   } catch (err) {
     console.error('[store] readProject', id, err)
     return null
   }
 }
 
-/**
- * @param {Project} project
- */
-export function writeProject(project) {
+export async function writeProject(project) {
   if (!project?.id) return
+  const pool = await getPool()
+  if (pool) {
+    const payload = JSON.stringify(project)
+    const id = project.id
+    const userId = project.userId ?? null
+    const createdAt = project.createdAt || project.updatedAt
+    const updatedAt = project.updatedAt || project.createdAt
+    await pool.query(
+      'INSERT INTO projects (id, user_id, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE updated_at = ?, data = ?',
+      [id, userId, createdAt, updatedAt, payload, updatedAt, payload]
+    )
+    return
+  }
   ensureDataDir()
-  const file = projectPath(project.id)
-  fs.writeFileSync(file, JSON.stringify(project, null, 2), 'utf8')
+  fs.writeFileSync(projectPath(project.id), JSON.stringify(project, null, 2), 'utf8')
 }
 
-/**
- * 列出指定用户的项目（仅 id、title、updatedAt）
- * @param {string} userId - 用户 id，仅返回 project.userId === userId 的项目；无 userId 的旧文件不返回
- * @returns {Array<{ id: string, title: string, updatedAt: string }>}
- */
-export function listProjects(userId) {
+export async function listProjects(userId) {
   if (!userId || typeof userId !== 'string') return []
+  const pool = await getPool()
+  if (pool) {
+    const [rows] = await pool.query(
+      'SELECT data FROM projects WHERE user_id = ? ORDER BY updated_at DESC',
+      [userId]
+    )
+    return rows.map((row) => {
+      const data = typeof row.data === 'string' ? JSON.parse(row.data) : row.data
+      return {
+        id: data?.id || '',
+        title: data?.title || '未命名',
+        updatedAt: data?.updatedAt || data?.createdAt || '',
+      }
+    })
+  }
   ensureDataDir()
   const files = fs.readdirSync(DATA_DIR).filter((f) => f.endsWith('.json'))
   const list = []
@@ -82,19 +93,14 @@ export function listProjects(userId) {
         updatedAt: data.updatedAt || data.createdAt || '',
       })
     } catch {
-      // 解析失败或无 userId 的跳过
+      //
     }
   }
   list.sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
   return list
 }
 
-/**
- * 创建新项目并持久化
- * @param {Object} payload - setting, title?, oneLinePromise?, characters?, outline, userId
- * @returns {Project}
- */
-export function createProject(payload) {
+export async function createProject(payload) {
   const now = new Date().toISOString()
   const project = {
     id: randomUUID(),
@@ -106,8 +112,8 @@ export function createProject(payload) {
     oneLinePromise: payload.oneLinePromise ?? '',
     characters: Array.isArray(payload.characters) ? payload.characters : [],
     outline: payload.outline ?? { totalChapters: 0, chapters: [] },
-    chapters: {}, // { [chapterIndex]: { content, wordCount, status, summary? } }
+    chapters: {},
   }
-  writeProject(project)
+  await writeProject(project)
   return project
 }

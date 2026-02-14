@@ -7,6 +7,7 @@ import cors from 'cors'
 import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, runConsistencyCheck, ALLOWED_MODELS } from './ai/deepseek.js'
 import { createProject, readProject, writeProject, listProjects } from './store/projects.js'
 import { sendVerificationCode, loginWithCode, loginWithPassword, registerWithPassword, requireAuth } from './auth.js'
+import { getPool, ensureSchema } from './db-mysql.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 dotenv.config({ path: path.resolve(__dirname, '..', '.env') })
@@ -23,9 +24,9 @@ app.get('/api/health', (req, res) => {
 
 // ---------- 认证 ----------
 /** 注册：用户 ID + 密码，返回 { user, token } */
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   const { userId, password } = req.body || {}
-  const result = registerWithPassword(userId, password)
+  const result = await registerWithPassword(userId, password)
   if (result.error) {
     return res.status(400).json({ error: result.error })
   }
@@ -33,17 +34,17 @@ app.post('/api/auth/register', (req, res) => {
 })
 
 /** 登录：支持 ① 用户 ID + 密码 ② 手机号 + 验证码（短信开通后使用），返回 { user, token } */
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { userId, password, phone, code } = req.body || {}
   if (userId !== undefined && userId !== '' && password !== undefined) {
-    const result = loginWithPassword(userId, password)
+    const result = await loginWithPassword(userId, password)
     if (result.error) {
       return res.status(401).json({ error: result.error })
     }
     return res.json(result)
   }
   if (phone !== undefined && code !== undefined) {
-    const result = loginWithCode(phone, code)
+    const result = await loginWithCode(phone, code)
     if (result.error) {
       return res.status(401).json({ error: result.error })
     }
@@ -200,16 +201,16 @@ function buildPreviousSummaryFromProject(project, upToChapterIndex, tailCharsPer
 }
 
 /** 仅当项目存在且属于当前用户时返回 project，否则返回 null */
-function getProjectForUser(projectId, userId) {
-  const project = readProject(projectId)
+async function getProjectForUser(projectId, userId) {
+  const project = await readProject(projectId)
   if (!project || project.userId !== userId) return null
   return project
 }
 
 /** 获取项目列表（仅当前用户）；需登录 */
-app.get(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
+app.get(['/api/projects', '/api/projects/'], requireAuth, async (req, res) => {
   try {
-    const list = listProjects(req.user.id)
+    const list = await listProjects(req.user.id)
     res.json({ projects: list })
   } catch (err) {
     console.error('[/api/projects]', err)
@@ -217,14 +218,16 @@ app.get(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
   }
 })
 
-/** 创建项目（确认大纲后调用）；需登录，项目归属当前用户 */
-app.post(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
+/** 创建项目；需登录，项目归属当前用户。可先传 setting/title/characters 建草稿（outline 可为空），后续 PATCH 补充大纲 */
+app.post(['/api/projects', '/api/projects/'], requireAuth, async (req, res) => {
   try {
     const { setting, title, oneLinePromise, characters, outline } = req.body || {}
-    if (!setting || !outline?.chapters?.length) {
-      return res.status(400).json({ error: '缺少 setting 或 outline.chapters' })
+    if (!setting) {
+      return res.status(400).json({ error: '缺少 setting' })
     }
-    const project = createProject({
+    const outlineChapters = outline?.chapters
+    const hasOutline = Array.isArray(outlineChapters) && outlineChapters.length > 0
+    const project = await createProject({
       userId: req.user.id,
       setting: {
         worldBackground: String(setting.worldBackground ?? ''),
@@ -235,8 +238,8 @@ app.post(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
       oneLinePromise: oneLinePromise != null ? String(oneLinePromise) : '',
       characters: Array.isArray(characters) ? characters : [],
       outline: {
-        totalChapters: Number(outline.totalChapters) || outline.chapters.length,
-        chapters: outline.chapters,
+        totalChapters: hasOutline ? (Number(outline.totalChapters) || outlineChapters.length) : 0,
+        chapters: hasOutline ? outlineChapters : [],
       },
     })
     res.status(201).json(project)
@@ -247,8 +250,8 @@ app.post(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
 })
 
 /** 导出项目：仅 TXT；需登录且项目归属当前用户 */
-app.get('/api/projects/:id/export', requireAuth, (req, res) => {
-  const project = getProjectForUser(req.params.id, req.user.id)
+app.get('/api/projects/:id/export', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   const format = (req.query.format || 'txt').toLowerCase()
   if (format !== 'txt') {
@@ -308,15 +311,15 @@ app.get('/api/projects/:id/export', requireAuth, (req, res) => {
 })
 
 /** 获取项目；需登录且项目归属当前用户 */
-app.get('/api/projects/:id', requireAuth, (req, res) => {
-  const project = getProjectForUser(req.params.id, req.user.id)
+app.get('/api/projects/:id', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   res.json(project)
 })
 
 /** 更新项目（设定、书名、角色、大纲等）；需登录且项目归属当前用户 */
-app.patch('/api/projects/:id', requireAuth, (req, res) => {
-  const project = getProjectForUser(req.params.id, req.user.id)
+app.patch('/api/projects/:id', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   const { setting, title, oneLinePromise, characters, outline } = req.body || {}
   if (setting) {
@@ -336,14 +339,14 @@ app.patch('/api/projects/:id', requireAuth, (req, res) => {
     }
   }
   project.updatedAt = new Date().toISOString()
-  writeProject(project)
+  await writeProject(project)
   res.json(project)
 })
 
 /** 按项目 + 章节生成正文；需登录且项目归属当前用户 */
 app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async (req, res) => {
   try {
-    const project = getProjectForUser(req.params.id, req.user.id)
+    const project = await getProjectForUser(req.params.id, req.user.id)
     if (!project) return res.status(404).json({ error: '项目不存在' })
     const chapterIndex = Number(req.params.chapterIndex)
     if (!Number.isInteger(chapterIndex) || chapterIndex < 1) {
@@ -378,7 +381,7 @@ app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async
       status: 'draft',
     }
     project.updatedAt = new Date().toISOString()
-    writeProject(project)
+    await writeProject(project)
     res.json({
       content: result.content,
       chapterIndex,
@@ -392,8 +395,8 @@ app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async
 })
 
 /** 更新章节（正文或状态如锁定）；需登录且项目归属当前用户 */
-app.patch('/api/projects/:id/chapters/:chapterIndex', requireAuth, (req, res) => {
-  const project = getProjectForUser(req.params.id, req.user.id)
+app.patch('/api/projects/:id/chapters/:chapterIndex', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   const chapterIndex = String(req.params.chapterIndex)
   const { content, status } = req.body || {}
@@ -417,14 +420,14 @@ app.patch('/api/projects/:id/chapters/:chapterIndex', requireAuth, (req, res) =>
   }
 
   project.updatedAt = new Date().toISOString()
-  writeProject(project)
+  await writeProject(project)
   res.json(project.chapters[chapterIndex])
 })
 
 /** 发起一致性检查；需登录且项目归属当前用户 */
 app.post('/api/projects/:id/consistency/run', requireAuth, async (req, res) => {
   try {
-    const project = getProjectForUser(req.params.id, req.user.id)
+    const project = await getProjectForUser(req.params.id, req.user.id)
     if (!project) return res.status(404).json({ error: '项目不存在' })
     project.consistencyReport = {
       projectId: project.id,
@@ -432,7 +435,7 @@ app.post('/api/projects/:id/consistency/run', requireAuth, async (req, res) => {
       issues: [],
       status: 'running',
     }
-    writeProject(project)
+    await writeProject(project)
     const result = await runConsistencyCheck(project)
     project.consistencyReport = {
       projectId: project.id,
@@ -441,22 +444,22 @@ app.post('/api/projects/:id/consistency/run', requireAuth, async (req, res) => {
       status: result.status,
     }
     project.updatedAt = new Date().toISOString()
-    writeProject(project)
+    await writeProject(project)
     res.json(project.consistencyReport)
   } catch (err) {
     console.error('[/api/projects/:id/consistency/run]', err)
-    const project = getProjectForUser(req.params.id, req.user.id)
+    const project = await getProjectForUser(req.params.id, req.user.id)
     if (project?.consistencyReport?.status === 'running') {
       project.consistencyReport.status = 'failed'
-      writeProject(project)
+      await writeProject(project)
     }
     res.status(500).json({ error: err.message || '一致性检查失败' })
   }
 })
 
 /** 获取一致性检查状态；需登录且项目归属当前用户 */
-app.get('/api/projects/:id/consistency/status', requireAuth, (req, res) => {
-  const project = getProjectForUser(req.params.id, req.user.id)
+app.get('/api/projects/:id/consistency/status', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   const report = project.consistencyReport
   res.json({
@@ -466,8 +469,8 @@ app.get('/api/projects/:id/consistency/status', requireAuth, (req, res) => {
 })
 
 /** 获取一致性检查报告；需登录且项目归属当前用户 */
-app.get('/api/projects/:id/consistency/report', requireAuth, (req, res) => {
-  const project = getProjectForUser(req.params.id, req.user.id)
+app.get('/api/projects/:id/consistency/report', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   const report = project.consistencyReport
   if (!report) return res.status(404).json({ error: '暂无检查报告，请先发起检查' })
@@ -547,22 +550,33 @@ if (isProduction && fs.existsSync(publicDir)) {
   })
 }
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running at http://localhost:${PORT}`)
-  if (isProduction && fs.existsSync(publicDir)) {
-    console.log('Serving frontend from', publicDir)
+;(async () => {
+  const pool = getPool()
+  if (pool) {
+    try {
+      await ensureSchema()
+      console.log('MySQL schema ready')
+    } catch (e) {
+      console.error('MySQL ensureSchema failed', e)
+    }
   }
-})
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running at http://localhost:${PORT}`)
+    if (isProduction && fs.existsSync(publicDir)) {
+      console.log('Serving frontend from', publicDir)
+    }
+  })
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n端口 ${PORT} 已被占用，后端无法启动。`)
+      console.error('请任选一种方式处理：')
+      console.error(`  1) 查看并结束占用进程：lsof -i :${PORT}`)
+      console.error(`     然后执行：kill -9 <PID>`)
+      console.error(`  2) 换用其他端口：在项目根目录 .env 中设置 PORT=3003（或其它未占用端口）`)
+      console.error(`     并修改 web/.env.development 中 VITE_API_BASE_URL 为对应地址\n`)
+      process.exit(1)
+    }
+    throw err
+  })
+})()
 
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n端口 ${PORT} 已被占用，后端无法启动。`)
-    console.error('请任选一种方式处理：')
-    console.error(`  1) 查看并结束占用进程：lsof -i :${PORT}`)
-    console.error(`     然后执行：kill -9 <PID>`)
-    console.error(`  2) 换用其他端口：在项目根目录 .env 中设置 PORT=3003（或其它未占用端口）`)
-    console.error(`     并修改 web/.env.development 中 VITE_API_BASE_URL 为对应地址\n`)
-    process.exit(1)
-  }
-  throw err
-})
