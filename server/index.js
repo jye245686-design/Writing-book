@@ -1,0 +1,548 @@
+import path from 'path'
+import { fileURLToPath } from 'node:url'
+import fs from 'fs'
+import dotenv from 'dotenv'
+import express from 'express'
+import cors from 'cors'
+import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, runConsistencyCheck, ALLOWED_MODELS } from './ai/deepseek.js'
+import { createProject, readProject, writeProject, listProjects } from './store/projects.js'
+import { sendVerificationCode, loginWithCode, requireAuth } from './auth.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+dotenv.config({ path: path.resolve(__dirname, '..', '.env') })
+
+const app = express()
+const PORT = process.env.PORT || 3002
+
+app.use(cors({ origin: true }))
+app.use(express.json())
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true })
+})
+
+// ---------- 认证（手机号 + 验证码，阶段 1） ----------
+/** 发送验证码（开发环境验证码会打印到控制台） */
+app.post('/api/auth/send-code', (req, res) => {
+  const { phone } = req.body || {}
+  const result = sendVerificationCode(phone)
+  if (result.error) {
+    return res.status(400).json({ error: result.error })
+  }
+  res.json({ success: true })
+})
+
+/** 手机号 + 验证码登录/注册，返回 { user, token } */
+app.post('/api/auth/login', (req, res) => {
+  const { phone, code } = req.body || {}
+  const result = loginWithCode(phone, code)
+  if (result.error) {
+    return res.status(401).json({ error: result.error })
+  }
+  res.json(result)
+})
+
+/** 获取当前登录用户（需携带 Authorization: Bearer <token>） */
+app.get('/api/me', requireAuth, (req, res) => {
+  res.json({ user: req.user })
+})
+
+// ---------- 业务接口 ----------
+/** 获取可用的模型列表（供前端模型/类型选择） */
+app.get('/api/ai/models', (req, res) => {
+  res.json({ models: ALLOWED_MODELS })
+})
+
+app.post('/api/ai/titles/suggest', async (req, res) => {
+  try {
+    const { worldBackground, genre, coreIdea, previousCandidates, model } = req.body || {}
+    if (!worldBackground || !genre) {
+      return res.status(400).json({ error: '缺少 worldBackground 或 genre' })
+    }
+    const candidates = await suggestTitles({
+      worldBackground,
+      genre,
+      coreIdea: coreIdea || '',
+      previousCandidates: Array.isArray(previousCandidates) ? previousCandidates : [],
+      model: model || undefined,
+    })
+    res.json({ candidates })
+  } catch (err) {
+    console.error('[/api/ai/titles/suggest]', err)
+    res.status(500).json({
+      error: err.message || '生成书名失败',
+    })
+  }
+})
+
+app.post('/api/ai/characters/suggest', async (req, res) => {
+  try {
+    const { title, worldBackground, genre, coreIdea, oneLinePromise, model } = req.body || {}
+    if (!title || !worldBackground || !genre) {
+      return res.status(400).json({ error: '缺少 title、worldBackground 或 genre' })
+    }
+    const characters = await suggestCharacters({
+      title,
+      worldBackground,
+      genre,
+      coreIdea: coreIdea || '',
+      oneLinePromise: oneLinePromise || '',
+      model: model || undefined,
+    })
+    res.json({ characters })
+  } catch (err) {
+    console.error('[/api/ai/characters/suggest]', err)
+    res.status(500).json({
+      error: err.message || '推荐角色失败',
+    })
+  }
+})
+
+/** 生成大纲（支持带/不带尾部斜杠，避免代理或客户端重定向导致 404） */
+app.post(['/api/ai/outline/generate', '/api/ai/outline/generate/'], async (req, res) => {
+  try {
+    const { title, worldBackground, genre, coreIdea, oneLinePromise, totalChapters, characters, model } = req.body || {}
+    if (!title || !worldBackground || !genre) {
+      return res.status(400).json({ error: '缺少 title、worldBackground 或 genre' })
+    }
+    const numChapters = Math.min(1000, Math.max(1, Number(totalChapters) || 30))
+    const outline = await generateOutline({
+      title,
+      worldBackground,
+      genre,
+      coreIdea: coreIdea || '',
+      oneLinePromise: oneLinePromise || '',
+      totalChapters: numChapters,
+      characters: Array.isArray(characters) ? characters : [],
+      model: model || undefined,
+    })
+    res.json(outline)
+  } catch (err) {
+    console.error('[/api/ai/outline/generate]', err)
+    res.status(500).json({
+      error: err.message || '生成大纲失败',
+    })
+  }
+})
+
+/** 分批生成大纲（用于 30 章等长大纲）；支持带/不带尾部斜杠 */
+const outlineBatchHandler = async (req, res) => {
+  try {
+    const { title, worldBackground, genre, coreIdea, oneLinePromise, totalChapters, characters, startChapterIndex, endChapterIndex, previousChapters, model } = req.body || {}
+    if (!title || !worldBackground || !genre) {
+      return res.status(400).json({ error: '缺少 title、worldBackground 或 genre' })
+    }
+    const numChapters = Math.min(1000, Math.max(1, Number(totalChapters) || 30))
+    const start = Math.max(1, Math.min(Number(startChapterIndex) || 1, numChapters))
+    const end = Math.max(start, Math.min(Number(endChapterIndex) || start, numChapters))
+    const result = await generateOutlineBatch({
+      title,
+      worldBackground,
+      genre,
+      coreIdea: coreIdea || '',
+      oneLinePromise: oneLinePromise || '',
+      totalChapters: numChapters,
+      characters: Array.isArray(characters) ? characters : [],
+      startChapterIndex: start,
+      endChapterIndex: end,
+      previousChapters: Array.isArray(previousChapters) ? previousChapters : [],
+      model: model || undefined,
+    })
+    res.json(result)
+  } catch (err) {
+    console.error('[/api/ai/outline/generate-batch]', err)
+    res.status(500).json({
+      error: err.message || '生成大纲失败',
+    })
+  }
+}
+app.post('/api/ai/outline/generate-batch', outlineBatchHandler)
+app.post('/api/ai/outline/generate-batch/', outlineBatchHandler)
+
+/** 前文摘要：从已持久化的章节中取每章末尾，总长上限约 3000 字 */
+function buildPreviousSummaryFromProject(project, upToChapterIndex, tailCharsPerChapter = 600, maxTotalChars = 3000) {
+  const parts = []
+  let total = 0
+  const chapters = project.chapters || {}
+  for (let i = 1; i < upToChapterIndex; i++) {
+    const ch = chapters[String(i)]
+    if (!ch?.content) continue
+    const tail = ch.content.slice(-tailCharsPerChapter)
+    if (tail.length + total > maxTotalChars) {
+      parts.push(tail.slice(-(maxTotalChars - total)))
+      total = maxTotalChars
+      break
+    }
+    parts.push(tail)
+    total += tail.length
+  }
+  return parts.join('\n---\n')
+}
+
+/** 仅当项目存在且属于当前用户时返回 project，否则返回 null */
+function getProjectForUser(projectId, userId) {
+  const project = readProject(projectId)
+  if (!project || project.userId !== userId) return null
+  return project
+}
+
+/** 获取项目列表（仅当前用户）；需登录 */
+app.get(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
+  try {
+    const list = listProjects(req.user.id)
+    res.json({ projects: list })
+  } catch (err) {
+    console.error('[/api/projects]', err)
+    res.status(500).json({ error: err.message || '获取项目列表失败' })
+  }
+})
+
+/** 创建项目（确认大纲后调用）；需登录，项目归属当前用户 */
+app.post(['/api/projects', '/api/projects/'], requireAuth, (req, res) => {
+  try {
+    const { setting, title, oneLinePromise, characters, outline } = req.body || {}
+    if (!setting || !outline?.chapters?.length) {
+      return res.status(400).json({ error: '缺少 setting 或 outline.chapters' })
+    }
+    const project = createProject({
+      userId: req.user.id,
+      setting: {
+        worldBackground: String(setting.worldBackground ?? ''),
+        genre: String(setting.genre ?? ''),
+        coreIdea: String(setting.coreIdea ?? ''),
+      },
+      title: title != null ? String(title) : '',
+      oneLinePromise: oneLinePromise != null ? String(oneLinePromise) : '',
+      characters: Array.isArray(characters) ? characters : [],
+      outline: {
+        totalChapters: Number(outline.totalChapters) || outline.chapters.length,
+        chapters: outline.chapters,
+      },
+    })
+    res.status(201).json(project)
+  } catch (err) {
+    console.error('[/api/projects]', err)
+    res.status(500).json({ error: err.message || '创建项目失败' })
+  }
+})
+
+/** 导出项目：仅 TXT；需登录且项目归属当前用户 */
+app.get('/api/projects/:id/export', requireAuth, (req, res) => {
+  const project = getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  const format = (req.query.format || 'txt').toLowerCase()
+  if (format !== 'txt') {
+    return res.status(400).json({ error: '仅支持 format=txt' })
+  }
+  const outline = project.outline || { chapters: [] }
+  const chapters = project.chapters || {}
+  const scope = (req.query.scope || 'locked').toLowerCase()
+  let indexesToExport = []
+
+  if (scope === 'all') {
+    indexesToExport = outline.chapters
+      .filter((ch) => {
+        const chap = chapters[String(ch.chapterIndex)]
+        return chap?.content
+      })
+      .map((ch) => ch.chapterIndex)
+    if (indexesToExport.length === 0) {
+      return res.status(400).json({ error: '暂无有正文的章节，请先生成或锁定章节后再导出' })
+    }
+  } else {
+    const lockedIndexes = outline.chapters
+      .filter((ch) => chapters[String(ch.chapterIndex)]?.status === 'locked')
+      .map((ch) => ch.chapterIndex)
+    const queryChapters = req.query.chapters
+    if (queryChapters && String(queryChapters).trim()) {
+      const requested = String(queryChapters)
+        .split(',')
+        .map((n) => Number(n.trim()))
+        .filter((n) => Number.isInteger(n) && n >= 1)
+      indexesToExport = requested.filter((i) => lockedIndexes.includes(i))
+    } else {
+      indexesToExport = lockedIndexes
+    }
+    if (indexesToExport.length === 0) {
+      return res.status(400).json({ error: '没有已锁定的章节或未勾选章节，请先锁定并勾选要导出的章节' })
+    }
+    indexesToExport.sort((a, b) => a - b)
+  }
+
+  const lines = [project.title || '未命名', '', project.oneLinePromise ? `一句话承诺：${project.oneLinePromise}` : '', '']
+  outline.chapters.forEach((ch) => {
+    if (!indexesToExport.includes(ch.chapterIndex)) return
+    const chap = chapters[String(ch.chapterIndex)]
+    const content = chap?.content ?? ''
+    lines.push(`第 ${ch.chapterIndex} 章 ${ch.title}`)
+    lines.push('')
+    lines.push(content)
+    lines.push('')
+    lines.push('')
+  })
+  const txt = lines.join('\n')
+  const filename = `${(project.title || 'book').replace(/[/\\?%*:|"]/g, '_')}.txt`
+  res.type('text/plain; charset=utf-8')
+  res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`)
+  res.send(txt)
+})
+
+/** 获取项目；需登录且项目归属当前用户 */
+app.get('/api/projects/:id', requireAuth, (req, res) => {
+  const project = getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  res.json(project)
+})
+
+/** 更新项目（设定、书名、角色、大纲等）；需登录且项目归属当前用户 */
+app.patch('/api/projects/:id', requireAuth, (req, res) => {
+  const project = getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  const { setting, title, oneLinePromise, characters, outline } = req.body || {}
+  if (setting) {
+    project.setting = {
+      worldBackground: String(setting.worldBackground ?? project.setting.worldBackground ?? ''),
+      genre: String(setting.genre ?? project.setting.genre ?? ''),
+      coreIdea: String(setting.coreIdea ?? project.setting.coreIdea ?? ''),
+    }
+  }
+  if (title !== undefined) project.title = String(title)
+  if (oneLinePromise !== undefined) project.oneLinePromise = String(oneLinePromise)
+  if (Array.isArray(characters)) project.characters = characters
+  if (outline) {
+    project.outline = {
+      totalChapters: Number(outline.totalChapters) ?? project.outline.totalChapters,
+      chapters: Array.isArray(outline.chapters) ? outline.chapters : project.outline.chapters,
+    }
+  }
+  project.updatedAt = new Date().toISOString()
+  writeProject(project)
+  res.json(project)
+})
+
+/** 按项目 + 章节生成正文；需登录且项目归属当前用户 */
+app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async (req, res) => {
+  try {
+    const project = getProjectForUser(req.params.id, req.user.id)
+    if (!project) return res.status(404).json({ error: '项目不存在' })
+    const chapterIndex = Number(req.params.chapterIndex)
+    if (!Number.isInteger(chapterIndex) || chapterIndex < 1) {
+      return res.status(400).json({ error: '无效的 chapterIndex' })
+    }
+    const outlineChapters = project.outline?.chapters ?? []
+    const outlineChapter = outlineChapters.find((c) => c.chapterIndex === chapterIndex)
+    if (!outlineChapter) {
+      return res.status(400).json({ error: '大纲中无该章节' })
+    }
+    const { wordCount: rawWordCount } = req.body || {}
+    const wordCount = Math.min(8000, Math.max(500, Number(rawWordCount) || 3000))
+    const previousSummary = buildPreviousSummaryFromProject(project, chapterIndex)
+    const result = await generateChapterContent({
+      title: project.title,
+      worldBackground: project.setting.worldBackground,
+      genre: project.setting.genre,
+      coreIdea: project.setting.coreIdea || '',
+      oneLinePromise: project.oneLinePromise || '',
+      characters: project.characters || [],
+      chapterIndex,
+      chapterTitle: outlineChapter.title,
+      chapterGoal: outlineChapter.goal || '',
+      chapterPoints: outlineChapter.points || [],
+      previousSummary,
+      wordCount,
+    })
+    project.chapters = project.chapters || {}
+    project.chapters[String(chapterIndex)] = {
+      content: result.content,
+      wordCount,
+      status: 'draft',
+    }
+    project.updatedAt = new Date().toISOString()
+    writeProject(project)
+    res.json({
+      content: result.content,
+      chapterIndex,
+      wordCount,
+      status: 'draft',
+    })
+  } catch (err) {
+    console.error('[/api/projects/:id/chapters/:chapterIndex/generate]', err)
+    res.status(500).json({ error: err.message || '生成章节正文失败' })
+  }
+})
+
+/** 更新章节（正文或状态如锁定）；需登录且项目归属当前用户 */
+app.patch('/api/projects/:id/chapters/:chapterIndex', requireAuth, (req, res) => {
+  const project = getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  const chapterIndex = String(req.params.chapterIndex)
+  const { content, status } = req.body || {}
+  project.chapters = project.chapters || {}
+
+  if (!project.chapters[chapterIndex]) {
+    const outline = project.outline || { chapters: [] }
+    const inOutline = outline.chapters.some((c) => String(c.chapterIndex) === chapterIndex)
+    if (!inOutline) return res.status(404).json({ error: '该章节不在大纲中' })
+    if (content === undefined && status === undefined) {
+      return res.status(404).json({ error: '该章节尚未生成' })
+    }
+    project.chapters[chapterIndex] = {
+      content: content !== undefined ? String(content) : '',
+      wordCount: 0,
+      status: status === 'locked' || status === 'draft' ? status : 'draft',
+    }
+  } else {
+    if (content !== undefined) project.chapters[chapterIndex].content = String(content)
+    if (status === 'locked' || status === 'draft') project.chapters[chapterIndex].status = status
+  }
+
+  project.updatedAt = new Date().toISOString()
+  writeProject(project)
+  res.json(project.chapters[chapterIndex])
+})
+
+/** 发起一致性检查；需登录且项目归属当前用户 */
+app.post('/api/projects/:id/consistency/run', requireAuth, async (req, res) => {
+  try {
+    const project = getProjectForUser(req.params.id, req.user.id)
+    if (!project) return res.status(404).json({ error: '项目不存在' })
+    project.consistencyReport = {
+      projectId: project.id,
+      checkedAt: new Date().toISOString(),
+      issues: [],
+      status: 'running',
+    }
+    writeProject(project)
+    const result = await runConsistencyCheck(project)
+    project.consistencyReport = {
+      projectId: project.id,
+      checkedAt: new Date().toISOString(),
+      issues: result.issues,
+      status: result.status,
+    }
+    project.updatedAt = new Date().toISOString()
+    writeProject(project)
+    res.json(project.consistencyReport)
+  } catch (err) {
+    console.error('[/api/projects/:id/consistency/run]', err)
+    const project = getProjectForUser(req.params.id, req.user.id)
+    if (project?.consistencyReport?.status === 'running') {
+      project.consistencyReport.status = 'failed'
+      writeProject(project)
+    }
+    res.status(500).json({ error: err.message || '一致性检查失败' })
+  }
+})
+
+/** 获取一致性检查状态；需登录且项目归属当前用户 */
+app.get('/api/projects/:id/consistency/status', requireAuth, (req, res) => {
+  const project = getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  const report = project.consistencyReport
+  res.json({
+    status: report?.status ?? 'none',
+    checkedAt: report?.checkedAt ?? null,
+  })
+})
+
+/** 获取一致性检查报告；需登录且项目归属当前用户 */
+app.get('/api/projects/:id/consistency/report', requireAuth, (req, res) => {
+  const project = getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  const report = project.consistencyReport
+  if (!report) return res.status(404).json({ error: '暂无检查报告，请先发起检查' })
+  res.json(report)
+})
+
+/** 按章生成正文（无状态：客户端带齐上下文，保留兼容） */
+app.post('/api/ai/chapters/generate', async (req, res) => {
+  try {
+    const {
+      title,
+      worldBackground,
+      genre,
+      coreIdea,
+      oneLinePromise,
+      characters,
+      chapterIndex,
+      chapterTitle,
+      chapterGoal,
+      chapterPoints,
+      previousSummary,
+      wordCount,
+      model,
+    } = req.body || {}
+    if (
+      title == null ||
+      worldBackground == null ||
+      genre == null ||
+      chapterIndex == null ||
+      chapterTitle == null
+    ) {
+      return res.status(400).json({
+        error: '缺少必填参数：title、worldBackground、genre、chapterIndex、chapterTitle',
+      })
+    }
+    const numWordCount = Math.min(8000, Math.max(500, Number(wordCount) || 3000))
+    const result = await generateChapterContent({
+      title: String(title),
+      worldBackground: String(worldBackground),
+      genre: String(genre),
+      coreIdea: coreIdea != null ? String(coreIdea) : '',
+      oneLinePromise: oneLinePromise != null ? String(oneLinePromise) : '',
+      characters: Array.isArray(characters) ? characters : [],
+      chapterIndex: Number(chapterIndex),
+      chapterTitle: String(chapterTitle),
+      chapterGoal: chapterGoal != null ? String(chapterGoal) : '',
+      chapterPoints: Array.isArray(chapterPoints) ? chapterPoints : [],
+      previousSummary: previousSummary != null ? String(previousSummary) : '',
+      wordCount: numWordCount,
+      model: model || undefined,
+    })
+    res.json(result)
+  } catch (err) {
+    console.error('[/api/ai/chapters/generate]', err)
+    res.status(500).json({
+      error: err.message || '生成章节正文失败',
+    })
+  }
+})
+
+/** 未匹配到的 API 请求返回 404 并带上 path/method 便于排查（如代理改写路径导致） */
+app.use('/api', (req, res) => {
+  res.status(404).json({
+    error: '接口不存在',
+    path: req.path,
+    method: req.method,
+  })
+})
+
+// ---------- 生产环境：托管前端静态资源（单体部署时前端与 API 同域，无需配置 VITE_API_BASE_URL） ----------
+const isProduction = process.env.NODE_ENV === 'production'
+const publicDir = process.env.PUBLIC_DIR || path.resolve(__dirname, '..', 'web', 'dist')
+if (isProduction && fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir, { index: false }))
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(publicDir, 'index.html'))
+  })
+}
+
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Server running at http://localhost:${PORT}`)
+  if (isProduction && fs.existsSync(publicDir)) {
+    console.log('Serving frontend from', publicDir)
+  }
+})
+
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n端口 ${PORT} 已被占用，后端无法启动。`)
+    console.error('请任选一种方式处理：')
+    console.error(`  1) 查看并结束占用进程：lsof -i :${PORT}`)
+    console.error(`     然后执行：kill -9 <PID>`)
+    console.error(`  2) 换用其他端口：在项目根目录 .env 中设置 PORT=3003（或其它未占用端口）`)
+    console.error(`     并修改 web/.env.development 中 VITE_API_BASE_URL 为对应地址\n`)
+    process.exit(1)
+  }
+  throw err
+})

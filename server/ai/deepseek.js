@@ -1,0 +1,609 @@
+const DEEPSEEK_BASE = 'https://api.deepseek.com'
+
+// API 当前最新：deepseek-chat = DeepSeek-V3.2 非思考，deepseek-reasoner = V3.2 思考模式（128K 上下文）
+const DEFAULT_MODEL = 'deepseek-chat'
+
+const MAX_RETRIES = 3
+
+/** 带重试的 fetch：失败时最多重试 MAX_RETRIES 次，间隔 1s/2s/3s */
+async function fetchWithRetry(url, options, retriesLeft = MAX_RETRIES) {
+  try {
+    const response = await fetch(url, options)
+    if (response.ok) return response
+    const text = await response.text()
+    const err = new Error(text || `DeepSeek API 错误: ${response.status}`)
+    if (retriesLeft <= 0) throw err
+  } catch (e) {
+    if (retriesLeft <= 0) throw e
+  }
+  const delayMs = 1000 * (MAX_RETRIES - retriesLeft + 1)
+  await new Promise((r) => setTimeout(r, delayMs))
+  return fetchWithRetry(url, options, retriesLeft - 1)
+}
+
+/** 允许的模型列表，供前端模型选择使用 */
+export const ALLOWED_MODELS = [
+  { id: 'deepseek-chat', name: 'DeepSeek-V3.2（非思考）', type: 'chat' },
+  { id: 'deepseek-reasoner', name: 'DeepSeek-V3.2（思考模式）', type: 'reasoner' },
+]
+
+function getApiKey() {
+  const key = process.env.DEEPSEEK_API_KEY
+  if (!key || !key.trim()) {
+    throw new Error('未配置 DEEPSEEK_API_KEY，请在项目根目录 .env 中设置')
+  }
+  return key.trim()
+}
+
+function resolveModel(override) {
+  const allowed = new Set(ALLOWED_MODELS.map((m) => m.id))
+  if (override && allowed.has(override)) return override
+  return process.env.DEEPSEEK_MODEL || DEFAULT_MODEL
+}
+
+/**
+ * 调用 DeepSeek 生成 3 个小说书名候选，且与 previousCandidates 不重复
+ * @param {Object} opts - worldBackground, genre, coreIdea, previousCandidates, model（可选，覆盖默认与 env）
+ */
+export async function suggestTitles({ worldBackground, genre, coreIdea, previousCandidates, model: modelOverride }) {
+  const model = resolveModel(modelOverride)
+  const systemPrompt = `你是一个小说书名生成助手。根据用户给出的世界背景、题材和可选的核心创意，生成恰好 3 个中文小说书名。要求：
+- 书名风格符合题材与背景，有吸引力；
+- 只输出一个 JSON 对象，格式为：{"candidates": ["书名1", "书名2", "书名3"]}
+- 不要输出任何其他文字、说明或 markdown 标记，仅此 JSON。`
+
+  let userPrompt = `世界背景：${worldBackground}\n题材：${genre}`
+  if (coreIdea && coreIdea.trim()) {
+    userPrompt += `\n核心创意：${coreIdea.trim()}`
+  }
+  if (previousCandidates && previousCandidates.length > 0) {
+    userPrompt += `\n\n请勿与以下书名重复，生成全新的 3 个：\n${previousCandidates.join('\n')}`
+  }
+  userPrompt += '\n\n请直接输出上述格式的 JSON。'
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      // reasoner 的 max_tokens 包含思考+答案总和，给足空间避免 content 被截断
+      max_tokens: 4096,
+      temperature: 0.8,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  // deepseek-reasoner 会返回 reasoning_content（思考过程）和 content（最终答案）；content 可能为空时从 reasoning 中提取 JSON
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+
+  if (!content && reasoningContent) {
+    // 尝试从思考内容末尾提取 {"candidates": [...]} 形式的 JSON
+    const jsonMatch = reasoningContent.match(/\{\s*"candidates"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (jsonMatch) {
+      content = jsonMatch[0]
+    } else {
+      content = reasoningContent
+    }
+  }
+
+  if (!content) {
+    console.error('[DeepSeek] 响应 message:', JSON.stringify(message, null, 2))
+    throw new Error('DeepSeek 未返回内容')
+  }
+
+  // 兼容可能被包裹在 markdown 代码块里的 JSON，或整段文字中嵌入了 JSON
+  let jsonStr = content
+  const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (codeBlock) {
+    jsonStr = codeBlock[1].trim()
+  } else {
+    const embedded = content.match(/\{\s*"candidates"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (embedded) {
+      jsonStr = embedded[0]
+    }
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    throw new Error('解析书名结果失败，请重试')
+  }
+
+  const list = parsed?.candidates
+  if (!Array.isArray(list) || list.length === 0) {
+    throw new Error('未得到有效书名列表，请重试')
+  }
+
+  return list.slice(0, 3).map((t) => String(t).trim()).filter(Boolean)
+}
+
+/**
+ * 调用 DeepSeek 根据书名、设定与已确认角色生成全书大纲（每章：标题、一句话目标、3～5 个要点）
+ * @param {Object} opts - title, worldBackground, genre, coreIdea?, oneLinePromise?, totalChapters, characters?, model?
+ * @returns {{ totalChapters: number, chapters: Array<{ chapterIndex: number, title: string, goal: string, points: string[] }> }}
+ */
+export async function generateOutline({
+  title,
+  worldBackground,
+  genre,
+  coreIdea = '',
+  oneLinePromise = '',
+  totalChapters,
+  characters = [],
+  model: modelOverride,
+}) {
+  const model = resolveModel(modelOverride)
+  const systemPrompt = `你是一个小说大纲助手。根据书名、世界背景、题材、（可选）全书一句话承诺以及**已确认的角色列表**，生成整本小说的章节大纲。
+要求：
+- **必须根据下列角色设计章节与冲突**，让剧情围绕这些角色展开，人物动机与关系需与角色设定一致。
+- 输出一个 JSON 对象，格式为：{"chapters": [{"chapterIndex": 1, "title": "章标题", "goal": "本章一句话目标", "points": ["要点1","要点2","要点3"]}, ...]}
+- chapterIndex 从 1 开始连续编号；每章必须有 title、goal、points；points 为 3～5 个关键要点（关键事件/转折/出场人物/结尾悬念等）。
+- 不要输出任何其他文字或 markdown 标记，仅此 JSON。`
+
+  let userPrompt = `书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
+  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
+  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
+  if (characters && characters.length > 0) {
+    userPrompt += `\n\n已确认角色（请根据以下角色设计大纲与冲突）：\n`
+    characters.forEach((c) => {
+      const parts = [c.name]
+      if (c.identity) parts.push(`身份：${c.identity}`)
+      if (c.personality) parts.push(`性格：${c.personality}`)
+      if (c.goal) parts.push(`目标：${c.goal}`)
+      if (c.relationToProtagonist) parts.push(`与主角关系：${c.relationToProtagonist}`)
+      if (c.speechStyle) parts.push(`说话风格：${c.speechStyle}`)
+      userPrompt += `- ${parts.join('；')}\n`
+    })
+  }
+  userPrompt += `\n请生成共 ${totalChapters} 章的完整大纲，直接输出上述格式的 JSON。`
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      // DeepSeek API 限制 max_tokens 范围为 [1, 8192]
+      max_tokens: 8192,
+      temperature: 0.7,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+
+  if (!content && reasoningContent) {
+    const jsonMatch = reasoningContent.match(/\{\s*"chapters"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (jsonMatch) content = jsonMatch[0]
+    else content = reasoningContent
+  }
+
+  if (!content) {
+    console.error('[DeepSeek] outline 响应 message:', JSON.stringify(message, null, 2))
+    throw new Error('DeepSeek 未返回大纲内容')
+  }
+
+  let jsonStr = content
+  const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (codeBlock) jsonStr = codeBlock[1].trim()
+  else {
+    const embedded = content.match(/\{\s*"chapters"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (embedded) jsonStr = embedded[0]
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    throw new Error('解析大纲结果失败，请重试')
+  }
+
+  const rawChapters = parsed?.chapters
+  if (!Array.isArray(rawChapters) || rawChapters.length === 0) {
+    throw new Error('未得到有效大纲章节，请重试')
+  }
+
+  const chapters = rawChapters.slice(0, totalChapters).map((ch, i) => ({
+    chapterIndex: Number(ch.chapterIndex) || i + 1,
+    title: String(ch.title ?? '').trim() || `第${i + 1}章`,
+    goal: String(ch.goal ?? '').trim() || '',
+    points: Array.isArray(ch.points) ? ch.points.map((p) => String(p).trim()).filter(Boolean) : [],
+  }))
+
+  return { totalChapters: chapters.length, chapters }
+}
+
+/** 分批生成大纲中的一段章节，用于长大纲（如 30 章）加速与稳定性；previousChapters 为已生成章节的摘要 [{ chapterIndex, title, goal }] */
+export async function generateOutlineBatch({
+  title,
+  worldBackground,
+  genre,
+  coreIdea = '',
+  oneLinePromise = '',
+  totalChapters,
+  characters = [],
+  startChapterIndex,
+  endChapterIndex,
+  previousChapters = [],
+  model: modelOverride,
+}) {
+  const model = resolveModel(modelOverride)
+  const systemPrompt = `你是一个小说大纲助手。根据书名、世界背景、题材、已确认角色以及**前文已生成的大纲**，继续生成后续章节大纲，保持剧情连贯。
+要求：
+- 输出一个 JSON 对象，格式为：{"chapters": [{"chapterIndex": 数字, "title": "章标题", "goal": "本章一句话目标", "points": ["要点1","要点2","要点3"]}, ...]}
+- chapterIndex 从 startChapterIndex 到 endChapterIndex 连续编号；每章必须有 title、goal、points；points 为 3～5 个关键要点。
+- 不要输出任何其他文字或 markdown 标记，仅此 JSON。`
+
+  let userPrompt = `书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
+  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
+  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
+  if (characters && characters.length > 0) {
+    userPrompt += `\n\n已确认角色：\n`
+    characters.forEach((c) => {
+      const parts = [c.name]
+      if (c.identity) parts.push(`身份：${c.identity}`)
+      if (c.personality) parts.push(`性格：${c.personality}`)
+      if (c.goal) parts.push(`目标：${c.goal}`)
+      if (c.relationToProtagonist) parts.push(`与主角关系：${c.relationToProtagonist}`)
+      userPrompt += `- ${parts.join('；')}\n`
+    })
+  }
+  if (previousChapters.length > 0) {
+    userPrompt += `\n已生成的前文大纲（请在此基础上延续）：\n`
+    previousChapters.forEach((ch) => {
+      userPrompt += `第 ${ch.chapterIndex} 章 ${ch.title}：${ch.goal || ''}\n`
+    })
+  }
+  userPrompt += `\n本书共 ${totalChapters} 章。请生成第 ${startChapterIndex} 至 ${endChapterIndex} 章的大纲，直接输出上述格式的 JSON。`
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      max_tokens: 8192,
+      temperature: 0.7,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+
+  if (!content && reasoningContent) {
+    const jsonMatch = reasoningContent.match(/\{\s*"chapters"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (jsonMatch) content = jsonMatch[0]
+    else content = reasoningContent
+  }
+
+  if (!content) {
+    console.error('[DeepSeek] outline batch 响应 message:', JSON.stringify(message, null, 2))
+    throw new Error('DeepSeek 未返回大纲内容')
+  }
+
+  let jsonStr = content
+  const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (codeBlock) jsonStr = codeBlock[1].trim()
+  else {
+    const embedded = content.match(/\{\s*"chapters"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (embedded) jsonStr = embedded[0]
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    throw new Error('解析大纲结果失败，请重试')
+  }
+
+  const rawChapters = parsed?.chapters || []
+  const chapters = rawChapters.map((ch, i) => ({
+    chapterIndex: Number(ch.chapterIndex) || startChapterIndex + i,
+    title: String(ch.title ?? '').trim() || `第${startChapterIndex + i}章`,
+    goal: String(ch.goal ?? '').trim() || '',
+    points: Array.isArray(ch.points) ? ch.points.map((p) => String(p).trim()).filter(Boolean) : [],
+  }))
+
+  return { chapters }
+}
+
+/**
+ * 根据书名与设定 AI 推荐主要角色（3～8 人），供用户选用或编辑
+ * @param {Object} opts - title, worldBackground, genre, coreIdea?, oneLinePromise?, model?
+ * @returns {Array<{ name, identity, personality, goal, relationToProtagonist, speechStyle }>}
+ */
+export async function suggestCharacters({
+  title,
+  worldBackground,
+  genre,
+  coreIdea = '',
+  oneLinePromise = '',
+  model: modelOverride,
+}) {
+  const model = resolveModel(modelOverride)
+  const systemPrompt = `你是一个小说角色设计助手。根据书名、世界背景、题材和（可选）核心创意与全书一句话承诺，生成该小说主要角色列表（3～8 人）。
+要求：
+- 输出一个 JSON 对象，格式为：{"characters": [{"name": "姓名", "identity": "身份", "personality": "性格", "goal": "目标/动机", "relationToProtagonist": "与主角关系", "speechStyle": "口头禅或说话风格"}, ...]}
+- 每个角色至少包含 name，其余字段可为空字符串。
+- 不要输出任何其他文字或 markdown 标记，仅此 JSON。`
+
+  let userPrompt = `书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
+  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
+  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
+  userPrompt += '\n\n请生成主要角色列表，直接输出上述格式的 JSON。'
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      max_tokens: 4096,
+      temperature: 0.7,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+
+  if (!content && reasoningContent) {
+    const jsonMatch = reasoningContent.match(/\{\s*"characters"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (jsonMatch) content = jsonMatch[0]
+    else content = reasoningContent
+  }
+
+  if (!content) {
+    console.error('[DeepSeek] suggestCharacters 响应 message:', JSON.stringify(message, null, 2))
+    throw new Error('DeepSeek 未返回角色内容')
+  }
+
+  let jsonStr = content
+  const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (codeBlock) jsonStr = codeBlock[1].trim()
+  else {
+    const embedded = content.match(/\{\s*"characters"\s*:\s*\[[\s\S]*\]\s*\}/)
+    if (embedded) jsonStr = embedded[0]
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    throw new Error('解析角色结果失败，请重试')
+  }
+
+  const raw = parsed?.characters
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error('未得到有效角色列表，请重试')
+  }
+
+  return raw.slice(0, 8).map((c) => ({
+    name: String(c.name ?? '').trim() || '未命名',
+    identity: String(c.identity ?? '').trim(),
+    personality: String(c.personality ?? '').trim(),
+    goal: String(c.goal ?? '').trim(),
+    relationToProtagonist: String(c.relationToProtagonist ?? '').trim(),
+    speechStyle: String(c.speechStyle ?? '').trim(),
+  }))
+}
+
+/**
+ * 根据全局设定、角色、本章大纲与前文摘要，生成单章正文
+ * @param {Object} opts - title, worldBackground, genre, coreIdea?, oneLinePromise?, characters[], chapterIndex, chapterTitle, chapterGoal, chapterPoints, previousSummary?, wordCount, model?
+ * @returns {{ content: string }}
+ */
+export async function generateChapterContent({
+  title,
+  worldBackground,
+  genre,
+  coreIdea = '',
+  oneLinePromise = '',
+  characters = [],
+  chapterIndex,
+  chapterTitle,
+  chapterGoal,
+  chapterPoints = [],
+  previousSummary = '',
+  wordCount = 3000,
+  model: modelOverride,
+}) {
+  const model = resolveModel(modelOverride)
+  const systemPrompt = `你是一位小说正文撰写助手。请根据给定的全局设定、角色列表、前文摘要与本章大纲，撰写本章正文。
+要求：
+- 正文风格与题材、世界背景一致，角色言行符合其设定。
+- 仅输出本章正文内容，不要输出章节标题或「第X章」等标记，不要输出任何解释或备注。
+- 尽量达到目标字数（约 ${wordCount} 字），可略多或略少，以自然收尾为准。`
+
+  let userPrompt = `【全书设定】\n书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
+  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
+  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
+
+  if (characters && characters.length > 0) {
+    userPrompt += `\n\n【角色列表】\n`
+    characters.forEach((c) => {
+      const parts = [c.name]
+      if (c.identity) parts.push(`身份：${c.identity}`)
+      if (c.personality) parts.push(`性格：${c.personality}`)
+      if (c.goal) parts.push(`目标：${c.goal}`)
+      if (c.relationToProtagonist) parts.push(`与主角关系：${c.relationToProtagonist}`)
+      if (c.speechStyle) parts.push(`说话风格：${c.speechStyle}`)
+      userPrompt += `- ${parts.join('；')}\n`
+    })
+  }
+
+  if (previousSummary.trim()) {
+    userPrompt += `\n【前文摘要（供衔接用）】\n${previousSummary.trim()}\n`
+  }
+
+  userPrompt += `\n【本章大纲】\n第 ${chapterIndex} 章：${chapterTitle}\n本章目标：${chapterGoal}\n关键要点：\n${(chapterPoints || []).map((p) => `- ${p}`).join('\n')}`
+  userPrompt += `\n\n请撰写上述章节的正文，约 ${wordCount} 字，直接输出正文内容。`
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      max_tokens: 8192,
+      temperature: 0.8,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+
+  if (!content && reasoningContent) content = reasoningContent
+  if (!content) {
+    console.error('[DeepSeek] generateChapterContent 响应 message:', JSON.stringify(message, null, 2))
+    throw new Error('DeepSeek 未返回正文内容')
+  }
+
+  return { content }
+}
+
+/**
+ * 一致性检查：根据项目设定、角色、大纲与已生成正文，检测时间线/人物/与大纲偏离等问题
+ * @param {Object} project - 完整项目（setting, title, oneLinePromise, characters, outline, chapters）
+ * @param {{ model?: string }} [opts]
+ * @returns {{ issues: Array<{ type: string, severity: string, chapterIndex: number, message: string, suggestion?: string }>, status: 'completed' }}
+ */
+export async function runConsistencyCheck(project, opts = {}) {
+  const model = resolveModel(opts.model)
+  const systemPrompt = `你是一位小说审读助手，负责检查已写正文与设定、大纲、角色是否一致。
+请根据给定的「世界观与设定」「角色列表」「大纲」以及「各章正文摘要」，找出以下类型的问题：
+1. **时间线矛盾**（type: timeline）：前后章节时间顺序、年龄、季节等不一致。
+2. **人物行为/性格与设定冲突**（type: character）：角色言行与身份、性格、目标不符，或与角色设定矛盾。
+3. **与大纲严重偏离**（type: outline_deviation）：章节目标或关键要点未体现，或剧情走向与大纲冲突。
+请仅输出一个 JSON 对象，格式为：{"issues":[{"type":"timeline|character|outline_deviation","severity":"warning|error","chapterIndex":数字,"message":"问题描述","suggestion":"可选修改建议"},...]}
+若无问题则输出 {"issues":[]}。不要输出任何其他文字或 markdown。`
+
+  let userPrompt = `【书名】${project.title || '未命名'}\n【世界背景】${project.setting?.worldBackground ?? ''}\n【题材】${project.setting?.genre ?? ''}\n【核心创意】${project.setting?.coreIdea ?? ''}\n【全书一句话承诺】${project.oneLinePromise ?? ''}\n\n【角色列表】\n`
+  ;(project.characters || []).forEach((c) => {
+    userPrompt += `- ${c.name}：${c.identity || ''}；性格：${c.personality || ''}；目标：${c.goal || ''}；与主角关系：${c.relationToProtagonist || ''}\n`
+  })
+
+  const outline = project.outline || { chapters: [] }
+  const outlineChapters = outline.chapters || []
+  // 一致性检查受模型上下文限制，超过此章数只检查最近部分，避免 prompt 超长导致失败
+  const MAX_CHAPTERS_FOR_CONSISTENCY = 150
+  const chaptersToCheck = outlineChapters.length > MAX_CHAPTERS_FOR_CONSISTENCY
+    ? outlineChapters.slice(-MAX_CHAPTERS_FOR_CONSISTENCY)
+    : outlineChapters
+
+  userPrompt += `\n【大纲】（共 ${outlineChapters.length} 章，以下仅列出参与本次检查的 ${chaptersToCheck.length} 章）\n`
+  chaptersToCheck.forEach((ch) => {
+    userPrompt += `第 ${ch.chapterIndex} 章 ${ch.title}：目标 ${ch.goal || ''}；要点：${(ch.points || []).join('、')}\n`
+  })
+
+  const chapters = project.chapters || {}
+  userPrompt += `\n【各章正文摘要（供检查用）】\n`
+  chaptersToCheck.forEach((ch) => {
+    const idx = ch.chapterIndex
+    const raw = chapters[String(idx)]?.content || ''
+    const head = raw.slice(0, 800)
+    const tail = raw.length > 1200 ? raw.slice(-400) : ''
+    const snippet = tail ? `${head}\n...（中略）...\n${tail}` : head
+    userPrompt += `\n--- 第 ${idx} 章 ${ch.title} ---\n${snippet || '（未生成）'}\n`
+  })
+
+  userPrompt += `\n请对上述内容做一致性检查，直接输出 JSON。`
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      max_tokens: 4096,
+      temperature: 0.3,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+  if (!content && reasoningContent) content = reasoningContent
+
+  let jsonStr = content
+  const codeBlock = content.match(/```(?:json)?\s*([\s\S]*?)```/)
+  if (codeBlock) jsonStr = codeBlock[1].trim()
+  const embedded = content.match(/\{\s*"issues"\s*:\s*\[[\s\S]*\]\s*\}/)
+  if (embedded) jsonStr = embedded[0]
+
+  let parsed
+  try {
+    parsed = JSON.parse(jsonStr)
+  } catch {
+    console.error('[DeepSeek] runConsistencyCheck 解析失败', content.slice(0, 500))
+    return { issues: [], status: 'completed' }
+  }
+
+  const rawIssues = Array.isArray(parsed?.issues) ? parsed.issues : []
+  const issues = rawIssues
+    .filter((i) => i && Number(i.chapterIndex) >= 1)
+    .map((i) => ({
+      type: String(i.type || 'other').toLowerCase(),
+      severity: String(i.severity || 'warning').toLowerCase(),
+      chapterIndex: Number(i.chapterIndex),
+      message: String(i.message || ''),
+      suggestion: i.suggestion != null ? String(i.suggestion) : undefined,
+    }))
+  const result = { issues, status: 'completed' }
+  if (outlineChapters.length > MAX_CHAPTERS_FOR_CONSISTENCY && chaptersToCheck.length > 0) {
+    result.checkedChaptersRange = {
+      from: chaptersToCheck[0].chapterIndex,
+      to: chaptersToCheck[chaptersToCheck.length - 1].chapterIndex,
+      total: outlineChapters.length,
+    }
+  }
+  return result
+}

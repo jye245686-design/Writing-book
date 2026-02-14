@@ -1,0 +1,11 @@
+node_modules
+web/node_modules
+server/node_modules
+.git
+.env
+.env.*
+*.log
+web/dist
+server/data
+docs
+README.md

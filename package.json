@@ -1,0 +1,13 @@
+{
+  "name": "ai-writing-book",
+  "private": true,
+  "description": "AI 小说生成（前端 + 后端单体部署用）",
+  "scripts": {
+    "install:all": "cd web && npm install && cd ../server && npm install",
+    "build": "cd web && npm run build",
+    "start": "NODE_ENV=production node server/index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
