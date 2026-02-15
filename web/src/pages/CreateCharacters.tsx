@@ -166,7 +166,7 @@ export default function CreateCharacters() {
             </Link>
           )}
         </div>
-        <h1 className="mt-2 text-2xl font-semibold text-gray-900">角色设定</h1>
+        <h1 className="page-title mt-2 text-2xl font-semibold text-gray-900 gradient-text">角色设定</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           书名：「{state.title}」。添加或编辑主要角色，确认后进入生成大纲。
         </p>

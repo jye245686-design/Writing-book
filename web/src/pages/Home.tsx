@@ -34,21 +34,23 @@ export default function Home() {
   }, [user])
 
   return (
-    <div className="space-y-8">
-      <section>
-        <h1 className="text-2xl font-semibold text-gray-900">开始创作</h1>
-        <p className="mt-2 text-[var(--color-text-muted)]">
+    <div className="space-y-10">
+      <section className="text-center md:text-left">
+        <h1 className="page-title text-3xl md:text-4xl text-gray-900 gradient-text">
+          开始创作
+        </h1>
+        <p className="mt-3 text-base text-[var(--color-text-muted)] max-w-xl">
           选择世界背景与题材，由 AI 生成书名与大纲，按章节完成整本小说。
         </p>
       </section>
 
       {authLoading ? (
-        <section className="card-flat p-6">
+        <section className="card-flat p-8">
           <p className="text-sm text-[var(--color-text-muted)]">加载中…</p>
         </section>
       ) : !user ? (
-        <section className="card-flat p-6 text-center">
-          <p className="text-[var(--color-text-muted)] mb-4">
+        <section className="card-flat p-10 text-center">
+          <p className="text-[var(--color-text-muted)] mb-6">
             登录后可查看「我的项目」并新建小说。
           </p>
           <Link to="/login" className="btn-flat btn-primary">
@@ -56,35 +58,33 @@ export default function Home() {
           </Link>
         </section>
       ) : (
-        <section className="card-flat p-6">
-          <h2 className="text-lg font-medium text-gray-900 mb-2">我的项目</h2>
+        <section className="card-flat p-8">
+          <h2 className="page-title text-xl text-gray-900 mb-1">我的项目</h2>
+          <p className="text-sm text-[var(--color-text-muted)] mb-6">
+            继续写之前的书，或新建一本。
+          </p>
           {loading ? (
-            <p className="text-sm text-[var(--color-text-muted)] mb-4">加载中…</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-6">加载中…</p>
           ) : listError ? (
-            <p className="text-sm text-[var(--color-text-muted)] mb-4">{listError}</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-6">{listError}</p>
           ) : projects.length === 0 ? (
-            <p className="text-sm text-[var(--color-text-muted)] mb-4">暂无项目，请先新建小说。</p>
+            <p className="text-sm text-[var(--color-text-muted)] mb-6">暂无项目，请先新建小说。</p>
           ) : (
-            <>
-              <p className="text-sm text-[var(--color-text-muted)] mb-4">
-                继续写之前的书，或新建一本。
-              </p>
-            <ul className="space-y-2 mb-4">
+            <ul className="space-y-3 mb-6">
               {projects.map((p) => (
                 <li key={p.id}>
                   <Link
                     to={`/create/writing/${p.id}`}
-                    className="block rounded border border-[var(--color-border)] px-4 py-3 text-left hover:bg-gray-50"
+                    className="flex items-center justify-between rounded-[var(--radius)] border border-[var(--color-border)] bg-white px-5 py-4 text-left transition-all hover:border-[var(--color-primary)]/30 hover:shadow-md hover:bg-[var(--color-primary-light)]/20"
                   >
                     <span className="font-medium text-gray-900">{p.title || '未命名'}</span>
-                    <span className="ml-2 text-xs text-[var(--color-text-muted)]">
+                    <span className="text-xs text-[var(--color-text-muted)]">
                       {p.updatedAt ? new Date(p.updatedAt).toLocaleString() : ''}
                     </span>
                   </Link>
                 </li>
               ))}
             </ul>
-            </>
           )}
           <Link to="/create" className="btn-flat btn-primary">
             新建小说

@@ -138,7 +138,7 @@ export default function Create() {
             </Link>
           )}
         </div>
-        <h1 className="mt-2 text-2xl font-semibold text-gray-900">创作设定</h1>
+        <h1 className="page-title mt-2 text-2xl font-semibold text-gray-900 gradient-text">创作设定</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           选择世界背景与题材，可选填写核心创意，用于后续生成书名与大纲。
         </p>

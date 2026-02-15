@@ -59,7 +59,7 @@ export default function Register() {
   return (
     <div className="max-w-sm mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">注册</h1>
+        <h1 className="page-title text-2xl font-semibold text-gray-900 gradient-text">注册</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           自定义用户 ID 和密码，注册后即可登录。
         </p>

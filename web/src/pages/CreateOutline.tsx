@@ -304,7 +304,7 @@ export default function CreateOutline() {
             </Link>
           )}
         </div>
-        <h1 className="mt-2 text-2xl font-semibold text-gray-900">生成大纲</h1>
+        <h1 className="page-title mt-2 text-2xl font-semibold text-gray-900 gradient-text">生成大纲</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           书名：「{state.title}」。根据书名与设定生成章节大纲，可编辑后确认。
         </p>
@@ -365,7 +365,7 @@ export default function CreateOutline() {
 
       {outline && outline.chapters.length > 0 && (
         <div className="space-y-4">
-          <h2 className="text-lg font-medium text-gray-900">大纲（可编辑）</h2>
+          <h2 className="page-title text-lg font-medium text-gray-900">大纲（可编辑）</h2>
           {outline.chapters.length > LARGE_CHAPTER_THRESHOLD && (
             <div className="flex flex-wrap items-center gap-2 text-sm text-[var(--color-text-muted)]">
               <button

@@ -52,7 +52,7 @@ export default function Login() {
   return (
     <div className="max-w-sm mx-auto space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold text-gray-900">登录</h1>
+        <h1 className="page-title text-2xl font-semibold text-gray-900 gradient-text">登录</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           使用用户 ID 和密码登录；未注册请先
           <Link to="/register" className="text-[var(--color-primary)] hover:underline ml-1">

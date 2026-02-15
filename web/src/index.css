@@ -2,17 +2,24 @@
 @tailwind components;
 @tailwind utilities;
 
-/* 简约扁平：设计令牌 */
+/* 主题：偏文艺/创作感，略华丽 */
 :root {
-  --color-bg: #fafafa;
+  --color-bg: #faf8ff;
   --color-bg-card: #ffffff;
-  --color-border: #e5e7eb;
-  --color-text: #111827;
-  --color-text-muted: #6b7280;
-  --color-primary: #2563eb;
-  --color-primary-hover: #1d4ed8;
-  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
-  --radius: 6px;
+  --color-border: #e9e5f0;
+  --color-text: #1a1625;
+  --color-text-muted: #6b6580;
+  --color-primary: #6d28d9;
+  --color-primary-hover: #5b21b6;
+  --color-primary-light: #ede9fe;
+  --color-accent: #a78bfa;
+  --font-sans: 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+  --font-serif: 'Noto Serif SC', Georgia, serif;
+  --radius: 10px;
+  --radius-lg: 14px;
+  --shadow-card: 0 1px 3px 0 rgb(0 0 0 / 0.06), 0 1px 2px -1px rgb(0 0 0 / 0.06);
+  --shadow-card-hover: 0 10px 25px -5px rgb(0 0 0 / 0.08), 0 4px 10px -6px rgb(0 0 0 / 0.05);
+  --shadow-btn: 0 2px 8px -2px rgb(109 40 217 / 0.4);
 }
 
 * {
@@ -26,33 +33,68 @@ body {
   color: var(--color-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  background-image:
+    radial-gradient(ellipse 120% 80% at 50% -20%, rgba(167, 139, 250, 0.12), transparent),
+    radial-gradient(ellipse 80% 50% at 100% 0%, rgba(196, 181, 253, 0.08), transparent);
 }
 
-/* 扁平按钮：无阴影、实色、细边框可选 */
+/* 标题使用衬线，更有「书」感 */
+.page-title {
+  font-family: var(--font-serif);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #5b21b6 0%, #7c3aed 50%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* 卡片：圆角、轻阴影、悬停上浮 */
+.card-flat {
+  @apply rounded-[var(--radius-lg)] border border-[var(--color-border)] bg-[var(--color-bg-card)];
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.2s ease, transform 0.2s ease;
+}
+.card-flat:hover {
+  box-shadow: var(--shadow-card-hover);
+}
+
+/* 主按钮：渐变 + 阴影 */
 .btn-flat {
-  @apply inline-flex items-center justify-center rounded-[var(--radius)] border border-[var(--color-border)] bg-white px-4 py-2 text-sm font-medium text-gray-800;
-  transition: background 0.15s ease, border-color 0.15s ease;
+  @apply inline-flex items-center justify-center rounded-[var(--radius)] border border-[var(--color-border)] bg-white px-4 py-2.5 text-sm font-medium text-gray-800;
+  transition: all 0.2s ease;
 }
 .btn-flat:hover {
-  @apply bg-gray-50 border-gray-300;
+  @apply border-gray-300 bg-gray-50;
 }
 .btn-primary {
-  @apply border-transparent bg-[var(--color-primary)] text-white;
+  border-color: transparent;
+  background: linear-gradient(135deg, #6d28d9 0%, #7c3aed 100%);
+  color: white;
+  box-shadow: var(--shadow-btn);
 }
 .btn-primary:hover {
-  background: var(--color-primary-hover);
+  background: linear-gradient(135deg, #5b21b6 0%, #6d28d9 100%);
+  box-shadow: 0 4px 14px -2px rgb(109 40 217 / 0.5);
+  transform: translateY(-1px);
 }
 
-/* 扁平输入框 */
+/* 输入框：圆角、聚焦环 */
 .input-flat {
-  @apply w-full rounded-[var(--radius)] border border-[var(--color-border)] bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400;
-  transition: border-color 0.15s ease;
+  @apply w-full rounded-[var(--radius)] border border-[var(--color-border)] bg-white px-3 py-2.5 text-sm text-gray-900 placeholder:text-gray-400;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .input-flat:focus {
-  @apply outline-none border-[var(--color-primary)];
+  @apply outline-none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(109, 40, 217, 0.12);
 }
 
-/* 卡片：纯白底 + 1px 边框，无阴影 */
-.card-flat {
-  @apply rounded-[var(--radius)] border border-[var(--color-border)] bg-[var(--color-bg-card)];
+/* 链接与强调色统一 */
+a.text-primary,
+.text-primary {
+  color: var(--color-primary);
 }

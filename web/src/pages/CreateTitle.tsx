@@ -140,7 +140,7 @@ export default function CreateTitle() {
             </Link>
           )}
         </div>
-        <h1 className="mt-2 text-2xl font-semibold text-gray-900">生成书名</h1>
+        <h1 className="page-title mt-2 text-2xl font-semibold text-gray-900 gradient-text">生成书名</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           根据「{setting.worldBackground}{setting.worldBackgroundSub ? `（${setting.worldBackgroundSub}）` : ''} + {setting.genre}」{setting.coreIdea ? `及创意「${setting.coreIdea}」` : ''}生成候选书名，选择或输入后确定。
         </p>

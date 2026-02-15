@@ -394,7 +394,7 @@ export default function CreateWriting() {
             ← 返回大纲
           </Link>
         </div>
-        <h1 className="mt-2 text-2xl font-semibold text-gray-900">按章生成正文</h1>
+        <h1 className="page-title mt-2 text-2xl font-semibold text-gray-900 gradient-text">按章生成正文</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
           书名：「{project.title}」。按顺序生成各章正文，可重写或锁定后继续下一章。数据已持久化，刷新不丢失。
         </p>
@@ -481,7 +481,7 @@ export default function CreateWriting() {
 
       {project.consistencyReport && project.consistencyReport.issues.length > 0 && (
         <section className="card-flat p-4 space-y-3">
-          <h2 className="text-lg font-medium text-gray-900">一致性报告（共 {project.consistencyReport.issues.length} 项）</h2>
+          <h2 className="page-title text-lg font-medium text-gray-900">一致性报告（共 {project.consistencyReport.issues.length} 项）</h2>
           {project.consistencyReport.checkedChaptersRange && (
             <p className="text-xs text-[var(--color-text-muted)]">
               本次检查第 {project.consistencyReport.checkedChaptersRange.from}–{project.consistencyReport.checkedChaptersRange.to} 章，全书共 {project.consistencyReport.checkedChaptersRange.total} 章
