@@ -4,7 +4,7 @@ import fs from 'fs'
 import dotenv from 'dotenv'
 import express from 'express'
 import cors from 'cors'
-import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, runConsistencyCheck, ALLOWED_MODELS } from './ai/deepseek.js'
+import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, runConsistencyCheck, generateSynopsis, ALLOWED_MODELS } from './ai/deepseek.js'
 import { createProject, readProject, writeProject, listProjects } from './store/projects.js'
 import { sendVerificationCode, loginWithCode, loginWithPassword, registerWithPassword, requireAuth } from './auth.js'
 import { getPool, ensureSchema } from './db-mysql.js'
@@ -16,7 +16,8 @@ const app = express()
 const PORT = process.env.PORT || 3002
 
 app.use(cors({ origin: true }))
-app.use(express.json())
+// 大纲 500+ 章时 JSON 体积可能超过 100kb，需提高限制避免 PATCH 保存失败
+app.use(express.json({ limit: '10mb' }))
 
 /** 世界背景 + 细分方向 拼成 AI 用字符串，如「古代（古风探案）」 */
 function worldBackgroundForAi(worldBackground, worldBackgroundSub) {
@@ -333,7 +334,7 @@ app.get('/api/projects/:id', requireAuth, async (req, res) => {
 app.patch('/api/projects/:id', requireAuth, async (req, res) => {
   const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
-  const { setting, title, oneLinePromise, characters, outline } = req.body || {}
+  const { setting, title, oneLinePromise, characters, outline, synopsis } = req.body || {}
   if (setting) {
     project.setting = {
       worldBackground: String(setting.worldBackground ?? project.setting.worldBackground ?? ''),
@@ -352,9 +353,57 @@ app.patch('/api/projects/:id', requireAuth, async (req, res) => {
       chapters: Array.isArray(outline.chapters) ? outline.chapters : project.outline.chapters,
     }
   }
+  if (synopsis !== undefined) project.synopsis = String(synopsis)
   project.updatedAt = new Date().toISOString()
   await writeProject(project)
   res.json(project)
+})
+
+/** 分片保存大纲：合并一段章节到项目，避免单次 body 过大；需登录且项目归属当前用户 */
+app.patch('/api/projects/:id/outline-chunk', requireAuth, async (req, res) => {
+  const project = await getProjectForUser(req.params.id, req.user.id)
+  if (!project) return res.status(404).json({ error: '项目不存在' })
+  const { totalChapters, startChapterIndex, chapters } = req.body || {}
+  if (
+    !Number.isInteger(totalChapters) ||
+    totalChapters < 1 ||
+    !Number.isInteger(startChapterIndex) ||
+    startChapterIndex < 1 ||
+    !Array.isArray(chapters) ||
+    chapters.length === 0
+  ) {
+    return res.status(400).json({ error: '缺少 totalChapters、startChapterIndex 或 chapters' })
+  }
+  const start = startChapterIndex - 1
+  const end = start + chapters.length
+  project.outline = project.outline || { totalChapters: 0, chapters: [] }
+  const existing = project.outline.chapters || []
+  const newChapters = [...existing.slice(0, start), ...chapters, ...existing.slice(end)]
+  project.outline.chapters = newChapters.length > totalChapters ? newChapters.slice(0, totalChapters) : newChapters
+  project.outline.totalChapters = totalChapters
+  project.updatedAt = new Date().toISOString()
+  await writeProject(project)
+  res.json(project)
+})
+
+/** 生成并保存作品简介（根据设定、角色、大纲由 AI 生成）；需登录且项目归属当前用户 */
+app.post('/api/projects/:id/synopsis/generate', requireAuth, async (req, res) => {
+  try {
+    const project = await getProjectForUser(req.params.id, req.user.id)
+    if (!project) return res.status(404).json({ error: '项目不存在' })
+    const outline = project.outline || { chapters: [] }
+    if (!outline.chapters || outline.chapters.length === 0) {
+      return res.status(400).json({ error: '请先完成大纲后再生成简介' })
+    }
+    const text = await generateSynopsis(project)
+    project.synopsis = text
+    project.updatedAt = new Date().toISOString()
+    await writeProject(project)
+    res.json({ synopsis: text })
+  } catch (err) {
+    console.error('[/api/projects/:id/synopsis/generate]', err)
+    res.status(500).json({ error: err.message || '生成简介失败' })
+  }
 })
 
 /** 按项目 + 章节生成正文；需登录且项目归属当前用户 */

@@ -38,6 +38,8 @@ interface ProjectPayload {
   outline: OutlineState
   chapters?: Record<string, { content: string; wordCount: number; status: string }>
   consistencyReport?: ConsistencyReport
+  /** 作品简介（由设定、角色、大纲生成） */
+  synopsis?: string
 }
 
 const apiBase = getApiBase()
@@ -56,6 +58,8 @@ export default function CreateWriting() {
   const [error, setError] = useState<string | null>(null)
   const [consistencyLoading, setConsistencyLoading] = useState(false)
   const [consistencyError, setConsistencyError] = useState<string | null>(null)
+  const [synopsisLoading, setSynopsisLoading] = useState(false)
+  const [synopsisError, setSynopsisError] = useState<string | null>(null)
   const [exportScope, setExportScope] = useState<'all' | 'locked'>('locked')
   const [selectedExportChapters, setSelectedExportChapters] = useState<number[]>([])
   const [successMessage, setSuccessMessage] = useState<string | null>(null)
@@ -190,6 +194,26 @@ export default function CreateWriting() {
       setConsistencyLoading(false)
     }
   }, [projectId])
+
+  const generateSynopsis = useCallback(async () => {
+    if (!projectId || !project) return
+    setSynopsisLoading(true)
+    setSynopsisError(null)
+    try {
+      const res = await fetchWithRetry(`${apiBase}/api/projects/${projectId}/synopsis/generate`, {
+        method: 'POST',
+        headers: getAuthHeaders(),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || `请求失败: ${res.status}`)
+      setProject((prev) => (prev ? { ...prev, synopsis: data.synopsis } : prev))
+      setSuccessMessage('作品简介已生成')
+    } catch (e) {
+      setSynopsisError(e instanceof Error ? e.message : '生成简介失败')
+    } finally {
+      setSynopsisLoading(false)
+    }
+  }, [projectId, project])
 
   const lockedChaptersList = project
     ? (project.outline?.chapters ?? [])
@@ -389,6 +413,14 @@ export default function CreateWriting() {
         <div className="flex flex-wrap items-center gap-3">
           <Link
             to={`/create/outline/${project.id}`}
+            state={{
+              setting: project.setting,
+              title: project.title,
+              oneLinePromise: project.oneLinePromise,
+              characters: project.characters,
+              outline: project.outline,
+              projectId: project.id,
+            }}
             className="text-sm text-[var(--color-text-muted)] hover:text-gray-900"
           >
             ← 返回大纲
@@ -531,6 +563,33 @@ export default function CreateWriting() {
           )}
         </p>
       )}
+
+      <section className="card-flat p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h2 className="page-title text-lg font-medium text-gray-900">作品简介</h2>
+          <button
+            type="button"
+            onClick={generateSynopsis}
+            disabled={synopsisLoading || !(project.outline?.chapters?.length)}
+            className="btn-flat btn-primary text-sm"
+            title={project.outline?.chapters?.length ? '根据当前设定、角色与大纲生成简介' : '请先完成大纲'}
+          >
+            {synopsisLoading ? '生成中…' : project.synopsis ? '重新生成' : '生成简介'}
+          </button>
+        </div>
+        {synopsisError && (
+          <p className="text-sm text-red-600">{synopsisError}</p>
+        )}
+        {project.synopsis ? (
+          <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-primary-light)]/10 p-4 text-sm text-gray-800 leading-relaxed whitespace-pre-wrap">
+            {project.synopsis}
+          </div>
+        ) : (
+          <p className="text-sm text-[var(--color-text-muted)]">
+            暂无简介。点击「生成简介」将根据本书世界观、角色设定与章节大纲由 AI 生成一段作品简介，便于上传书城或对外介绍。
+          </p>
+        )}
+      </section>
 
       <div className="space-y-6">
         {isLargeChapterCount && (

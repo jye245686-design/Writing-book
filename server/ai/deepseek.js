@@ -631,3 +631,78 @@ export async function runConsistencyCheck(project, opts = {}) {
   }
   return result
 }
+
+/**
+ * 根据项目设定、角色、大纲生成作品简介，与世界观、角色、章节剧情紧密联系
+ * @param {Object} project - 完整项目（setting, title, oneLinePromise, characters, outline）
+ * @param {{ model?: string }} [opts]
+ * @returns {Promise<string>} 简介正文（纯文本，约 200～500 字）
+ */
+export async function generateSynopsis(project, opts = {}) {
+  const model = resolveModel(opts.model)
+  const systemPrompt = `你是一位小说简介撰写助手。根据用户提供的「书名」「本书设定」「角色列表」和「章节大纲」，撰写一段作品简介。
+要求：
+- 简介须与世界观、题材、核心创意、角色设定以及大纲中的剧情走向紧密联系，概括全书核心冲突与看点；
+- 长度约 200～500 字，适合作为书城/连载平台的作品简介，吸引读者；
+- 只输出简介正文，不要输出「简介：」等前缀或任何 markdown、标题。`
+
+  const worldBg = (project.setting?.worldBackground ?? '') + (project.setting?.worldBackgroundSub ? `（${project.setting.worldBackgroundSub}）` : '')
+  const settingBlock = buildSettingBlock({
+    worldBackground: worldBg,
+    genre: project.setting?.genre ?? '',
+    coreIdea: project.setting?.coreIdea ?? '',
+    oneLinePromise: project.oneLinePromise ?? '',
+    optionalTags: project.setting?.optionalTags ?? [],
+  })
+
+  let userPrompt = `【书名】${project.title || '未命名'}\n\n${settingBlock}\n\n【角色列表】\n`
+  ;(project.characters || []).forEach((c) => {
+    userPrompt += `- ${c.name}：${c.identity || ''}；性格：${c.personality || ''}；目标：${c.goal || ''}；与主角关系：${c.relationToProtagonist || ''}\n`
+  })
+
+  const outline = project.outline || { chapters: [] }
+  const outlineChapters = outline.chapters || []
+  const maxChaptersForSynopsis = 80
+  const chaptersToUse = outlineChapters.length > maxChaptersForSynopsis
+    ? [...outlineChapters.slice(0, 20), ...outlineChapters.slice(-10)]
+    : outlineChapters
+
+  userPrompt += `\n【大纲】（共 ${outlineChapters.length} 章）\n`
+  chaptersToUse.forEach((ch) => {
+    userPrompt += `第 ${ch.chapterIndex} 章 ${ch.title}：${ch.goal || ''}；要点：${(ch.points || []).slice(0, 3).join('、')}\n`
+  })
+  if (outlineChapters.length > maxChaptersForSynopsis) {
+    userPrompt += `…（中间章节省略）…\n`
+  }
+
+  userPrompt += `\n请根据以上内容撰写作品简介，直接输出简介正文。`
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      max_tokens: 1024,
+      temperature: 0.6,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let content = message?.content?.trim() || ''
+  const reasoningContent = message?.reasoning_content?.trim() || ''
+  if (!content && reasoningContent) content = reasoningContent
+
+  if (!content) {
+    throw new Error('DeepSeek 未返回简介内容')
+  }
+
+  return content.replace(/^[:：]\s*简介\s*[:：]?/i, '').trim()
+}

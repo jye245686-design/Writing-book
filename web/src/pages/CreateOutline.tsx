@@ -32,6 +32,8 @@ const BATCH_SIZE = 10
 const PREVIOUS_CHAPTERS_FOR_CONTINUITY = 15 // 继续生成时传入前文大纲的章数，保持一致性
 const LARGE_CHAPTER_THRESHOLD = 100 // 超过此章数时：生成前二次确认、列表分页展示
 const OUTLINE_PAGE_SIZE = 50
+/** 单次保存大纲的章节数上限，超过则分片请求 outline-chunk，避免 body 过大 */
+const OUTLINE_SAVE_CHUNK_SIZE = 80
 
 export default function CreateOutline() {
   const location = useLocation()
@@ -44,11 +46,15 @@ export default function CreateOutline() {
   const [loadingProject, setLoadingProject] = useState(!!projectIdFromUrl && !locationState?.setting)
   const state = resolvedState ?? locationState
 
-  const [totalChapters, setTotalChapters] = useState(30)
-  const [outline, setOutline] = useState<OutlineState | null>(() => (state as OutlineLocationState & { outline?: OutlineState })?.outline ?? null)
+  const initialOutline = (state as OutlineLocationState & { outline?: OutlineState })?.outline ?? null
+  const [totalChapters, setTotalChapters] = useState(() =>
+    initialOutline?.totalChapters ?? initialOutline?.chapters?.length ?? 30
+  )
+  const [outline, setOutline] = useState<OutlineState | null>(() => initialOutline ?? null)
   const [loading, setLoading] = useState(false)
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
   const [outlinePage, setOutlinePage] = useState(0)
   const saveOutlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const projectId = projectIdFromUrl || state?.projectId
@@ -60,18 +66,29 @@ export default function CreateOutline() {
       return
     }
     let cancelled = false
+    setLoadFailed(false)
     fetchWithRetry(apiUrl(`/api/projects/${projectIdFromUrl}`), { headers: getAuthHeaders() })
       .then((res) => {
-        if (cancelled || !res.ok) return res.ok ? res.json() : null
+        if (cancelled) return null
+        if (!res.ok) return null
         return res.json()
       })
       .then((data) => {
         if (cancelled || !data) return
+        const setting = data.setting && typeof data.setting === 'object'
+          ? {
+              worldBackground: String(data.setting.worldBackground ?? ''),
+              genre: String(data.setting.genre ?? ''),
+              coreIdea: String(data.setting.coreIdea ?? ''),
+              worldBackgroundSub: data.setting.worldBackgroundSub != null ? String(data.setting.worldBackgroundSub) : undefined,
+              optionalTags: Array.isArray(data.setting.optionalTags) ? data.setting.optionalTags : undefined,
+            }
+          : { worldBackground: '', genre: '', coreIdea: '' }
         setResolvedState({
-          setting: data.setting ?? { worldBackground: '', genre: '', coreIdea: '' },
+          setting,
           title: data.title ?? '',
           oneLinePromise: data.oneLinePromise ?? '',
-          characters: data.characters ?? [],
+          characters: Array.isArray(data.characters) ? data.characters : [],
           outline: data.outline?.chapters?.length ? data.outline : undefined,
           projectId: data.id,
         })
@@ -82,7 +99,9 @@ export default function CreateOutline() {
           setTotalChapters(data.outline.totalChapters)
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) setLoadFailed(true)
+      })
       .finally(() => {
         if (!cancelled) setLoadingProject(false)
       })
@@ -138,10 +157,24 @@ export default function CreateOutline() {
   if (!state) {
     return (
       <div className="space-y-6">
-        <p className="text-[var(--color-text-muted)]">请先完成角色步骤。</p>
-        <Link to="/create/characters" className="btn-flat btn-primary">
-          去设定角色
-        </Link>
+        {loadFailed && projectIdFromUrl ? (
+          <>
+            <p className="text-[var(--color-text-muted)]">项目加载失败，请检查网络或稍后重试。</p>
+            <div className="flex flex-wrap gap-3">
+              <Link to="/" className="btn-flat btn-primary">返回首页</Link>
+              {projectIdFromUrl && (
+                <Link to={`/create/writing/${projectIdFromUrl}`} className="btn-flat">返回写作页</Link>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="text-[var(--color-text-muted)]">请先完成角色步骤。</p>
+            <Link to="/create/characters" className="btn-flat btn-primary">
+              去设定角色
+            </Link>
+          </>
+        )}
       </div>
     )
   }
@@ -185,7 +218,7 @@ export default function CreateOutline() {
       accumulated.push(...batch)
       const newOutline = { totalChapters, chapters: [...accumulated] }
       setOutline(newOutline)
-      if (projectId) saveOutlineToProject(projectId, newOutline)
+      if (projectId) saveOutlineToProject(projectId, newOutline).catch(() => {})
       setProgress({ done: accumulated.length, total: totalChapters })
     }
   }
@@ -239,18 +272,36 @@ export default function CreateOutline() {
     }
   }
 
-  const saveOutlineToProject = useCallback(
-    (pid: string, outlineData: OutlineState) => {
-      fetchWithRetry(apiUrl(`/api/projects/${pid}`), {
+  /** 保存大纲到服务端：章节数不超过 OUTLINE_SAVE_CHUNK_SIZE 时一次 PATCH，否则按片 PATCH outline-chunk 合并，保证全部保存成功 */
+  const saveOutlineToProject = useCallback(async (pid: string, outlineData: OutlineState): Promise<void> => {
+    const { totalChapters, chapters } = outlineData
+    if (!chapters.length) return
+    const headers = { 'Content-Type': 'application/json', ...getAuthHeaders() }
+    if (chapters.length <= OUTLINE_SAVE_CHUNK_SIZE) {
+      const res = await fetchWithRetry(apiUrl(`/api/projects/${pid}`), {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        headers,
         body: JSON.stringify({
-          outline: { totalChapters: outlineData.totalChapters, chapters: outlineData.chapters },
+          outline: { totalChapters, chapters },
         }),
-      }).catch(() => {})
-    },
-    []
-  )
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存失败: ${res.status}`)
+      return
+    }
+    for (let start = 0; start < chapters.length; start += OUTLINE_SAVE_CHUNK_SIZE) {
+      const chunk = chapters.slice(start, start + OUTLINE_SAVE_CHUNK_SIZE)
+      const res = await fetchWithRetry(apiUrl(`/api/projects/${pid}/outline-chunk`), {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          totalChapters,
+          startChapterIndex: start + 1,
+          chapters: chunk,
+        }),
+      })
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `保存失败: ${res.status}`)
+    }
+  }, [])
 
   const updateChapter = (index: number, field: keyof OutlineChapter, value: string | string[]) => {
     if (!outline) return
@@ -268,13 +319,20 @@ export default function CreateOutline() {
     }
   }
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (!outline || outline.chapters.length === 0) return
-    if (projectId) {
-      navigate(`/create/writing/${projectId}`)
-    } else {
+    if (!projectId) {
       setError('项目未就绪，请稍候或刷新后重试')
+      return
     }
+    // 确认前再保存一次完整大纲（自动分片时多段请求），保证服务端数据完整
+    try {
+      await saveOutlineToProject(projectId, outline)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存大纲失败，请重试')
+      return
+    }
+    navigate(`/create/writing/${projectId}`)
   }
 
   return (
