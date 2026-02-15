@@ -101,15 +101,17 @@
 
 ### 2.2 创作设定（Setting）
 
-对应「阶段 0」：世界背景、题材、核心创意。
+对应「阶段 0」：世界背景（含可选细分方向）、题材、核心创意。
 
 | 字段           | 类型   | 说明 |
 |----------------|--------|------|
-| `worldBackground` | string | 世界背景（如古代/末世/星际）。 |
-| `genre`        | string | 题材（如玄幻/言情/悬疑）。 |
+| `worldBackground` | string | 世界背景主类（古代/现代/末世/星际）。 |
+| `worldBackgroundSub` | string | 可选。世界背景细分方向（如古风探案、朝堂权谋、灵气复苏、机甲等），与主类搭配使用；传入 AI 时拼接为「主类（细分）」如「古代（古风探案）」。 |
+| `genre`        | string | 题材（如玄幻/言情/悬疑/都市/科幻/武侠）。 |
 | `coreIdea`     | string | 可选，核心创意或一句话梗概。 |
+| `optionalTags` | string[] | 可选。文本设定标签（如系统、重生、无限流、种田、甜宠、逆袭等），分 7 层：机制/外挂、时空/身份、结构玩法、内容风格、生活向爽点、情感向钩子、目标导向；传入 AI 用于贴合风格与爽点，增强生成效果。 |
 
-与 Project 关系：1:1，可内嵌在 Project 或单独表/文档存储，由 `projectId` 关联。
+与 Project 关系：1:1，可内嵌在 Project 或单独表/文档存储，由 `projectId` 关联。各 AI 接口（书名推荐、角色推荐、大纲生成、章节生成、一致性检查）在接收或读取 setting 时，将 worldBackground 与 worldBackgroundSub 合并为单一「世界背景」字符串传入模型；若有 optionalTags 则一并写入 prompt，供模型贴合标签风格与爽点。
 
 ### 2.3 大纲（Outline）
 
@@ -199,7 +201,7 @@
 
 | 说明           | Method | Path | 说明 |
 |----------------|--------|------|------|
-| 创建项目       | POST   | /api/projects | 创建新书，body 含 Setting（worldBackground, genre, coreIdea）。 |
+| 创建项目       | POST   | /api/projects | 创建新书，body 含 Setting（worldBackground, 可选 worldBackgroundSub, genre, coreIdea, 可选 optionalTags）。 |
 | **获取项目列表（已实现）** | GET | **/api/projects** | 返回 { projects: [{ id, title, updatedAt }] }，按 updatedAt 倒序；用于首页「我的项目」。 |
 | 获取项目列表（分页） | GET    | /api/projects | 分页、筛选（如 status）为后续扩展。 |
 | 获取项目详情   | GET    | /api/projects/:id | 含 Setting、当前 status。 |
@@ -220,13 +222,13 @@
 | 获取角色列表   | GET    | /api/projects/:id/characters | 返回 Character[]。 |
 | 更新角色       | PUT    | /api/projects/:id/characters | body: Character[]；用户添加/编辑/删除后保存。 |
 | 确认角色       | POST   | /api/projects/:id/characters/confirm | 将项目状态置为 characters_ok，允许进入大纲生成。 |
-| **AI 推荐角色（已实现）** | POST | **/api/ai/characters/suggest** | body: title, worldBackground, genre, coreIdea?, oneLinePromise?；返回 { characters: Character[] }，当前端无 projectId 时直接调用此 AI 接口。 |
+| **AI 推荐角色（已实现）** | POST | **/api/ai/characters/suggest** | body: title, worldBackground, worldBackgroundSub?, genre, coreIdea?, oneLinePromise?, optionalTags?；返回 { characters: Character[] }。 |
 
 ### 3.4 大纲
 
 | 说明           | Method | Path | 说明 |
 |----------------|--------|------|------|
-| **生成大纲（已实现）** | POST | **/api/ai/outline/generate** | body: title, worldBackground, genre, coreIdea?, oneLinePromise?, **totalChapters**, **characters**（已确认角色列表）；AI 提示词已强调「根据下列角色设计章节与冲突」，返回 { totalChapters, chapters }。 |
+| **生成大纲（已实现）** | POST | **/api/ai/outline/generate** | body: title, worldBackground, worldBackgroundSub?, genre, coreIdea?, oneLinePromise?, optionalTags?, **totalChapters**, **characters**；返回 { totalChapters, chapters }。 |
 | 获取大纲       | GET    | /api/projects/:id/outline | 返回 Outline。 |
 | 更新大纲       | PUT    | /api/projects/:id/outline | body: 完整 Outline；支持单章编辑或整份替换。 |
 | 确认大纲       | POST   | /api/projects/:id/outline/confirm | 将项目状态置为 outline_ok。 |
@@ -483,7 +485,7 @@
     "id": "proj-uuid-001",
     "title": "宗门弃徒的逆袭之路",
     "oneLinePromise": "…",
-    "setting": { "worldBackground": "古代", "genre": "玄幻", "coreIdea": "…" }
+    "setting": { "worldBackground": "古代", "worldBackgroundSub": "古风探案", "genre": "玄幻", "coreIdea": "…", "optionalTags": ["逆袭", "系统", "甜宠"] }
   },
   "outline": { "totalChapters": 30, "chapters": [ … ] },
   "characters": [ … ],

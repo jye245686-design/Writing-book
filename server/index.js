@@ -18,6 +18,12 @@ const PORT = process.env.PORT || 3002
 app.use(cors({ origin: true }))
 app.use(express.json())
 
+/** 世界背景 + 细分方向 拼成 AI 用字符串，如「古代（古风探案）」 */
+function worldBackgroundForAi(worldBackground, worldBackgroundSub) {
+  if (!worldBackground) return ''
+  return worldBackgroundSub ? `${worldBackground}（${worldBackgroundSub}）` : worldBackground
+}
+
 app.get('/api/health', (req, res) => {
   res.json({ ok: true })
 })
@@ -76,14 +82,15 @@ app.get('/api/ai/models', (req, res) => {
 
 app.post('/api/ai/titles/suggest', async (req, res) => {
   try {
-    const { worldBackground, genre, coreIdea, previousCandidates, model } = req.body || {}
+    const { worldBackground, worldBackgroundSub, genre, coreIdea, optionalTags, previousCandidates, model } = req.body || {}
     if (!worldBackground || !genre) {
       return res.status(400).json({ error: '缺少 worldBackground 或 genre' })
     }
     const candidates = await suggestTitles({
-      worldBackground,
+      worldBackground: worldBackgroundForAi(worldBackground, worldBackgroundSub),
       genre,
       coreIdea: coreIdea || '',
+      optionalTags: Array.isArray(optionalTags) ? optionalTags : [],
       previousCandidates: Array.isArray(previousCandidates) ? previousCandidates : [],
       model: model || undefined,
     })
@@ -98,16 +105,17 @@ app.post('/api/ai/titles/suggest', async (req, res) => {
 
 app.post('/api/ai/characters/suggest', async (req, res) => {
   try {
-    const { title, worldBackground, genre, coreIdea, oneLinePromise, model } = req.body || {}
+    const { title, worldBackground, worldBackgroundSub, genre, coreIdea, oneLinePromise, optionalTags, model } = req.body || {}
     if (!title || !worldBackground || !genre) {
       return res.status(400).json({ error: '缺少 title、worldBackground 或 genre' })
     }
     const characters = await suggestCharacters({
       title,
-      worldBackground,
+      worldBackground: worldBackgroundForAi(worldBackground, worldBackgroundSub),
       genre,
       coreIdea: coreIdea || '',
       oneLinePromise: oneLinePromise || '',
+      optionalTags: Array.isArray(optionalTags) ? optionalTags : [],
       model: model || undefined,
     })
     res.json({ characters })
@@ -122,17 +130,18 @@ app.post('/api/ai/characters/suggest', async (req, res) => {
 /** 生成大纲（支持带/不带尾部斜杠，避免代理或客户端重定向导致 404） */
 app.post(['/api/ai/outline/generate', '/api/ai/outline/generate/'], async (req, res) => {
   try {
-    const { title, worldBackground, genre, coreIdea, oneLinePromise, totalChapters, characters, model } = req.body || {}
+    const { title, worldBackground, worldBackgroundSub, genre, coreIdea, oneLinePromise, optionalTags, totalChapters, characters, model } = req.body || {}
     if (!title || !worldBackground || !genre) {
       return res.status(400).json({ error: '缺少 title、worldBackground 或 genre' })
     }
     const numChapters = Math.min(1000, Math.max(1, Number(totalChapters) || 30))
     const outline = await generateOutline({
       title,
-      worldBackground,
+      worldBackground: worldBackgroundForAi(worldBackground, worldBackgroundSub),
       genre,
       coreIdea: coreIdea || '',
       oneLinePromise: oneLinePromise || '',
+      optionalTags: Array.isArray(optionalTags) ? optionalTags : [],
       totalChapters: numChapters,
       characters: Array.isArray(characters) ? characters : [],
       model: model || undefined,
@@ -149,7 +158,7 @@ app.post(['/api/ai/outline/generate', '/api/ai/outline/generate/'], async (req, 
 /** 分批生成大纲（用于 30 章等长大纲）；支持带/不带尾部斜杠 */
 const outlineBatchHandler = async (req, res) => {
   try {
-    const { title, worldBackground, genre, coreIdea, oneLinePromise, totalChapters, characters, startChapterIndex, endChapterIndex, previousChapters, model } = req.body || {}
+    const { title, worldBackground, worldBackgroundSub, genre, coreIdea, oneLinePromise, optionalTags, totalChapters, characters, startChapterIndex, endChapterIndex, previousChapters, model } = req.body || {}
     if (!title || !worldBackground || !genre) {
       return res.status(400).json({ error: '缺少 title、worldBackground 或 genre' })
     }
@@ -158,10 +167,11 @@ const outlineBatchHandler = async (req, res) => {
     const end = Math.max(start, Math.min(Number(endChapterIndex) || start, numChapters))
     const result = await generateOutlineBatch({
       title,
-      worldBackground,
+      worldBackground: worldBackgroundForAi(worldBackground, worldBackgroundSub),
       genre,
       coreIdea: coreIdea || '',
       oneLinePromise: oneLinePromise || '',
+      optionalTags: Array.isArray(optionalTags) ? optionalTags : [],
       totalChapters: numChapters,
       characters: Array.isArray(characters) ? characters : [],
       startChapterIndex: start,
@@ -231,8 +241,10 @@ app.post(['/api/projects', '/api/projects/'], requireAuth, async (req, res) => {
       userId: req.user.id,
       setting: {
         worldBackground: String(setting.worldBackground ?? ''),
+        worldBackgroundSub: setting.worldBackgroundSub != null ? String(setting.worldBackgroundSub) : undefined,
         genre: String(setting.genre ?? ''),
         coreIdea: String(setting.coreIdea ?? ''),
+        optionalTags: Array.isArray(setting.optionalTags) ? setting.optionalTags : undefined,
       },
       title: title != null ? String(title) : '',
       oneLinePromise: oneLinePromise != null ? String(oneLinePromise) : '',
@@ -325,8 +337,10 @@ app.patch('/api/projects/:id', requireAuth, async (req, res) => {
   if (setting) {
     project.setting = {
       worldBackground: String(setting.worldBackground ?? project.setting.worldBackground ?? ''),
+      worldBackgroundSub: setting.worldBackgroundSub != null ? String(setting.worldBackgroundSub) : (project.setting.worldBackgroundSub ?? undefined),
       genre: String(setting.genre ?? project.setting.genre ?? ''),
       coreIdea: String(setting.coreIdea ?? project.setting.coreIdea ?? ''),
+      optionalTags: setting.optionalTags != null ? (Array.isArray(setting.optionalTags) ? setting.optionalTags : project.setting.optionalTags) : (project.setting.optionalTags ?? undefined),
     }
   }
   if (title !== undefined) project.title = String(title)
@@ -362,10 +376,11 @@ app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async
     const previousSummary = buildPreviousSummaryFromProject(project, chapterIndex)
     const result = await generateChapterContent({
       title: project.title,
-      worldBackground: project.setting.worldBackground,
+      worldBackground: worldBackgroundForAi(project.setting.worldBackground, project.setting.worldBackgroundSub),
       genre: project.setting.genre,
       coreIdea: project.setting.coreIdea || '',
       oneLinePromise: project.oneLinePromise || '',
+      optionalTags: Array.isArray(project.setting.optionalTags) ? project.setting.optionalTags : [],
       characters: project.characters || [],
       chapterIndex,
       chapterTitle: outlineChapter.title,
@@ -551,14 +566,16 @@ if (isProduction && fs.existsSync(publicDir)) {
 }
 
 ;(async () => {
-  const pool = getPool()
+  const pool = await getPool()
   if (pool) {
     try {
       await ensureSchema()
-      console.log('MySQL schema ready')
+      console.log('[存储] MySQL 已连接，数据存数据库')
     } catch (e) {
       console.error('MySQL ensureSchema failed', e)
     }
+  } else {
+    console.log('[存储] 未配置 MySQL（无 DATABASE_URL 或 MYSQL_HOST/USER/PASSWORD），使用本地 JSON 文件：server/data/')
   }
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running at http://localhost:${PORT}`)

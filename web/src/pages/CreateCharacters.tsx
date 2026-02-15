@@ -82,9 +82,11 @@ export default function CreateCharacters() {
         body: JSON.stringify({
           title: state.title,
           worldBackground: state.setting.worldBackground,
+          worldBackgroundSub: state.setting.worldBackgroundSub || undefined,
           genre: state.setting.genre,
           coreIdea: state.setting.coreIdea || '',
           oneLinePromise: state.oneLinePromise || '',
+          optionalTags: state.setting.optionalTags?.length ? state.setting.optionalTags : undefined,
         }),
       })
       const data = await res.json().catch(() => ({}))

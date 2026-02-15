@@ -149,9 +149,11 @@ export default function CreateOutline() {
   const basePayload = {
       title: state.title,
       worldBackground: state.setting.worldBackground,
+      worldBackgroundSub: state.setting.worldBackgroundSub || undefined,
       genre: state.setting.genre,
       coreIdea: state.setting.coreIdea || '',
       oneLinePromise: state.oneLinePromise || '',
+      optionalTags: state.setting.optionalTags?.length ? state.setting.optionalTags : undefined,
       totalChapters,
       characters: state.characters ?? [],
     }

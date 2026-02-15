@@ -1,5 +1,6 @@
 /**
- * MySQL 连接与建表（Zeabur 内网：MYSQL_HOST=mysql.zeabur.internal, MYSQL_PORT=3306）
+ * MySQL 连接与建表。
+ * 支持 Zeabur 内网、PlanetScale（DATABASE_URL + SSL）、自建 MySQL。
  * 未配置时 getPool() 返回 null，store 层回退到 JSON 文件。
  */
 import mysql from 'mysql2/promise'
@@ -18,27 +19,19 @@ function getConfig() {
   return { host, user, password, database, port }
 }
 
-/** 若数据库不存在则创建（仅建库不建表），便于 Zeabur 等未在控制台建库时自动可用 */
+/** 是否使用 DATABASE_URL（PlanetScale 等托管库已自带库，无需 CREATE DATABASE） */
+function isUrlConfig(config) {
+  return !!config.url
+}
+
+/** 若数据库不存在则创建（仅建库不建表）。Zeabur 等自建 MySQL 用；PlanetScale 用 URL 时跳过。 */
 async function ensureDatabase(config) {
-  if (config.url) {
-    const u = new URL(config.url)
-    const dbName = (u.pathname || '/').replace(/^\/+|\/+$/g) || 'writing_book'
-    const conn = await mysql.createConnection({
-      host: u.hostname,
-      port: Number(u.port) || 3306,
-      user: decodeURIComponent(u.username),
-      password: decodeURIComponent(u.password),
-    })
-    try {
-      await conn.query(`CREATE DATABASE IF NOT EXISTS \`${dbName}\``)
-    } finally {
-      await conn.end()
-    }
-    return
-  }
+  if (isUrlConfig(config)) return
+  const host = config.host
+  const port = Number(config.port) || 3306
   const conn = await mysql.createConnection({
-    host: config.host,
-    port: Number(config.port) || 3306,
+    host,
+    port,
     user: config.user,
     password: config.password,
   })
@@ -47,6 +40,12 @@ async function ensureDatabase(config) {
   } finally {
     await conn.end()
   }
+}
+
+/** 托管 MySQL（如 PlanetScale）需 SSL，本地可关 */
+function getSslOption() {
+  if (process.env.MYSQL_SSL === '0' || process.env.MYSQL_SSL === 'false') return undefined
+  return { rejectUnauthorized: true }
 }
 
 /**
@@ -58,8 +57,14 @@ export async function getPool() {
   if (!config) return null
   try {
     await ensureDatabase(config)
+    const ssl = getSslOption()
     if (config.url) {
-      pool = mysql.createPool({ uri: config.url, waitForConnections: true, connectionLimit: 10 })
+      pool = mysql.createPool({
+        uri: config.url,
+        waitForConnections: true,
+        connectionLimit: 10,
+        ...(ssl && { ssl }),
+      })
     } else {
       pool = mysql.createPool({
         host: config.host,
@@ -69,6 +74,7 @@ export async function getPool() {
         database: config.database,
         waitForConnections: true,
         connectionLimit: 10,
+        ...(ssl && { ssl }),
       })
     }
     await pool.query('SELECT 1')

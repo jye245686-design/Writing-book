@@ -7,8 +7,12 @@ import type { OutlineState } from './CreateOutline'
 
 export interface SettingState {
   worldBackground: string
+  /** 世界背景细分方向（如古风探案、朝堂权谋），选填 */
+  worldBackgroundSub?: string
   genre: string
   coreIdea: string
+  /** 可选标签（机制/时空/结构/风格/生活/情感/目标等），选填，用于增强生成 */
+  optionalTags?: string[]
 }
 
 type TitlePageState = {
@@ -57,8 +61,10 @@ export default function CreateTitle() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           worldBackground: setting.worldBackground,
+          worldBackgroundSub: setting.worldBackgroundSub || undefined,
           genre: setting.genre,
           coreIdea: setting.coreIdea || '',
+          optionalTags: setting.optionalTags?.length ? setting.optionalTags : undefined,
           previousCandidates,
         }),
       })
@@ -136,7 +142,7 @@ export default function CreateTitle() {
         </div>
         <h1 className="mt-2 text-2xl font-semibold text-gray-900">生成书名</h1>
         <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-          根据「{setting.worldBackground} + {setting.genre}」{setting.coreIdea ? `及创意「${setting.coreIdea}」` : ''}生成候选书名，选择或输入后确定。
+          根据「{setting.worldBackground}{setting.worldBackgroundSub ? `（${setting.worldBackgroundSub}）` : ''} + {setting.genre}」{setting.coreIdea ? `及创意「${setting.coreIdea}」` : ''}生成候选书名，选择或输入后确定。
         </p>
       </div>
 

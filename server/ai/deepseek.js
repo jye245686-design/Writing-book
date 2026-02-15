@@ -42,20 +42,36 @@ function resolveModel(override) {
 }
 
 /**
+ * 构建统一的「本书设定」摘要块，供书名/大纲/正文等 prompt 使用，保证与设定和标签紧贴
+ * @param {{ worldBackground: string, genre: string, coreIdea?: string, oneLinePromise?: string, optionalTags?: string[] }}
+ */
+function buildSettingBlock({ worldBackground, genre, coreIdea = '', oneLinePromise = '', optionalTags = [] }) {
+  let block = `【本书设定（必须严格遵循，不得偏离）】\n世界背景：${worldBackground}\n题材：${genre}`
+  if (coreIdea.trim()) block += `\n核心创意：${coreIdea.trim()}`
+  if (oneLinePromise.trim()) block += `\n全书一句话承诺：${oneLinePromise.trim()}`
+  if (Array.isArray(optionalTags) && optionalTags.length > 0) {
+    block += `\n可选标签（风格与爽点须在内容中体现）：${optionalTags.join('、')}`
+  }
+  return block
+}
+
+/** 统一约束句，用于大纲与正文，减少偏离设定 */
+const CONSTRAINT_LINE = '\n禁止：出现与上述设定和标签无关或矛盾的背景、风格、词汇或剧情。'
+
+/**
  * 调用 DeepSeek 生成 3 个小说书名候选，且与 previousCandidates 不重复
  * @param {Object} opts - worldBackground, genre, coreIdea, previousCandidates, model（可选，覆盖默认与 env）
  */
-export async function suggestTitles({ worldBackground, genre, coreIdea, previousCandidates, model: modelOverride }) {
+export async function suggestTitles({ worldBackground, genre, coreIdea, optionalTags = [], previousCandidates, model: modelOverride }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一个小说书名生成助手。根据用户给出的世界背景、题材和可选的核心创意，生成恰好 3 个中文小说书名。要求：
-- 书名风格符合题材与背景，有吸引力；
+  const systemPrompt = `你是一个小说书名生成助手。根据用户给出的本书设定生成恰好 3 个中文小说书名。要求：
+- 书名必须严格贴合给定的世界背景、题材、核心创意与可选标签，不得出现与之无关或矛盾的风格；
+- 若提供可选标签，书名应直接体现这些标签所代表的风格/爽点（如系统流、重生、甜宠、逆袭等）；
 - 只输出一个 JSON 对象，格式为：{"candidates": ["书名1", "书名2", "书名3"]}
 - 不要输出任何其他文字、说明或 markdown 标记，仅此 JSON。`
 
-  let userPrompt = `世界背景：${worldBackground}\n题材：${genre}`
-  if (coreIdea && coreIdea.trim()) {
-    userPrompt += `\n核心创意：${coreIdea.trim()}`
-  }
+  const settingBlock = buildSettingBlock({ worldBackground, genre, coreIdea: coreIdea || '', optionalTags })
+  let userPrompt = `${settingBlock}\n\n请根据以上设定生成 3 个书名，严格贴合设定与标签。`
   if (previousCandidates && previousCandidates.length > 0) {
     userPrompt += `\n\n请勿与以下书名重复，生成全新的 3 个：\n${previousCandidates.join('\n')}`
   }
@@ -138,21 +154,22 @@ export async function generateOutline({
   genre,
   coreIdea = '',
   oneLinePromise = '',
+  optionalTags = [],
   totalChapters,
   characters = [],
   model: modelOverride,
 }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一个小说大纲助手。根据书名、世界背景、题材、（可选）全书一句话承诺以及**已确认的角色列表**，生成整本小说的章节大纲。
-要求：
-- **必须根据下列角色设计章节与冲突**，让剧情围绕这些角色展开，人物动机与关系需与角色设定一致。
-- 输出一个 JSON 对象，格式为：{"chapters": [{"chapterIndex": 1, "title": "章标题", "goal": "本章一句话目标", "points": ["要点1","要点2","要点3"]}, ...]}
-- chapterIndex 从 1 开始连续编号；每章必须有 title、goal、points；points 为 3～5 个关键要点（关键事件/转折/出场人物/结尾悬念等）。
+  const systemPrompt = `你是一个小说大纲助手。根据书名与**本书设定**（世界背景、题材、核心创意、一句话承诺、可选标签）以及**已确认的角色列表**，生成整本小说的章节大纲。要求：
+- 大纲必须严格贴合本书设定与可选标签，章节目标与要点不得偏离世界背景、题材与标签所约定的风格与爽点；
+- **必须根据下列角色设计章节与冲突**，让剧情围绕这些角色展开，人物动机与关系需与角色设定一致；
+- 若含可选标签（如系统、重生、无限流、种田、甜宠、逆袭等），大纲中须体现相应元素与节奏；
+- 输出一个 JSON 对象，格式为：{"chapters": [{"chapterIndex": 1, "title": "章标题", "goal": "本章一句话目标", "points": ["要点1","要点2","要点3"]}, ...]}；chapterIndex 从 1 开始连续编号；每章必须有 title、goal、points；points 为 3～5 个关键要点；
 - 不要输出任何其他文字或 markdown 标记，仅此 JSON。`
 
-  let userPrompt = `书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
-  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
-  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
+  const settingBlock = buildSettingBlock({ worldBackground, genre, coreIdea, oneLinePromise, optionalTags })
+  let userPrompt = `书名：${title}\n\n${settingBlock}`
+  userPrompt += CONSTRAINT_LINE
   if (characters && characters.length > 0) {
     userPrompt += `\n\n已确认角色（请根据以下角色设计大纲与冲突）：\n`
     characters.forEach((c) => {
@@ -238,6 +255,7 @@ export async function generateOutlineBatch({
   genre,
   coreIdea = '',
   oneLinePromise = '',
+  optionalTags = [],
   totalChapters,
   characters = [],
   startChapterIndex,
@@ -246,15 +264,14 @@ export async function generateOutlineBatch({
   model: modelOverride,
 }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一个小说大纲助手。根据书名、世界背景、题材、已确认角色以及**前文已生成的大纲**，继续生成后续章节大纲，保持剧情连贯。
-要求：
-- 输出一个 JSON 对象，格式为：{"chapters": [{"chapterIndex": 数字, "title": "章标题", "goal": "本章一句话目标", "points": ["要点1","要点2","要点3"]}, ...]}
-- chapterIndex 从 startChapterIndex 到 endChapterIndex 连续编号；每章必须有 title、goal、points；points 为 3～5 个关键要点。
+  const systemPrompt = `你是一个小说大纲助手。根据书名与**本书设定**以及已确认角色、前文已生成的大纲，继续生成后续章节大纲，保持剧情连贯。要求：
+- 大纲必须严格贴合本书设定与可选标签，不得偏离世界背景、题材与标签约定的风格与爽点；
+- 输出一个 JSON 对象，格式为：{"chapters": [{"chapterIndex": 数字, "title": "章标题", "goal": "本章一句话目标", "points": ["要点1","要点2","要点3"]}, ...]}；chapterIndex 从 startChapterIndex 到 endChapterIndex 连续编号；每章必须有 title、goal、points；points 为 3～5 个关键要点；
 - 不要输出任何其他文字或 markdown 标记，仅此 JSON。`
 
-  let userPrompt = `书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
-  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
-  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
+  const settingBlock = buildSettingBlock({ worldBackground, genre, coreIdea, oneLinePromise, optionalTags })
+  let userPrompt = `书名：${title}\n\n${settingBlock}`
+  userPrompt += CONSTRAINT_LINE
   if (characters && characters.length > 0) {
     userPrompt += `\n\n已确认角色：\n`
     characters.forEach((c) => {
@@ -344,19 +361,18 @@ export async function suggestCharacters({
   genre,
   coreIdea = '',
   oneLinePromise = '',
+  optionalTags = [],
   model: modelOverride,
 }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一个小说角色设计助手。根据书名、世界背景、题材和（可选）核心创意与全书一句话承诺，生成该小说主要角色列表（3～8 人）。
-要求：
-- 输出一个 JSON 对象，格式为：{"characters": [{"name": "姓名", "identity": "身份", "personality": "性格", "goal": "目标/动机", "relationToProtagonist": "与主角关系", "speechStyle": "口头禅或说话风格"}, ...]}
-- 每个角色至少包含 name，其余字段可为空字符串。
+  const systemPrompt = `你是一个小说角色设计助手。根据书名与**本书设定**（世界背景、题材、核心创意、一句话承诺、可选标签）生成该小说主要角色列表（3～8 人）。要求：
+- 角色身份、性格、目标与关系必须严格贴合本书设定与可选标签，不得出现与设定矛盾的设定；
+- 若含可选标签（如系统流、重生、甜宠、逆袭等），角色设定与关系应能支撑这些标签的剧情发展；
+- 输出一个 JSON 对象，格式为：{"characters": [{"name": "姓名", "identity": "身份", "personality": "性格", "goal": "目标/动机", "relationToProtagonist": "与主角关系", "speechStyle": "口头禅或说话风格"}, ...]}；每个角色至少包含 name；
 - 不要输出任何其他文字或 markdown 标记，仅此 JSON。`
 
-  let userPrompt = `书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
-  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
-  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
-  userPrompt += '\n\n请生成主要角色列表，直接输出上述格式的 JSON。'
+  const settingBlock = buildSettingBlock({ worldBackground, genre, coreIdea, oneLinePromise, optionalTags })
+  const userPrompt = `书名：${title}\n\n${settingBlock}\n\n请根据以上设定生成主要角色列表，严格贴合设定与标签，直接输出上述格式的 JSON。`
 
   const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
     method: 'POST',
@@ -432,6 +448,7 @@ export async function generateChapterContent({
   genre,
   coreIdea = '',
   oneLinePromise = '',
+  optionalTags = [],
   characters = [],
   chapterIndex,
   chapterTitle,
@@ -442,16 +459,15 @@ export async function generateChapterContent({
   model: modelOverride,
 }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一位小说正文撰写助手。请根据给定的全局设定、角色列表、前文摘要与本章大纲，撰写本章正文。
-要求：
-- 正文风格与题材、世界背景一致，角色言行符合其设定。
-- 仅输出本章正文内容，不要输出章节标题或「第X章」等标记，不要输出任何解释或备注。
+  const systemPrompt = `你是一位小说正文撰写助手。请根据给定的**全书设定**、角色列表、前文摘要与本章大纲，撰写本章正文。要求：
+- 正文必须严格贴合【全书设定】与【本章大纲】，不得自创与设定矛盾的设定、词汇或剧情；角色言行必须符合角色设定；
+- 若含可选标签，正文中须体现相应元素（如系统流有面板/提示、重生有对未来的利用、甜宠有情感互动、逆袭有成长节奏等），风格与爽点与标签一致；
+- 仅输出本章正文内容，不要输出章节标题或「第X章」等标记，不要输出任何解释或备注；
 - 尽量达到目标字数（约 ${wordCount} 字），可略多或略少，以自然收尾为准。`
 
-  let userPrompt = `【全书设定】\n书名：${title}\n世界背景：${worldBackground}\n题材：${genre}`
-  if (coreIdea.trim()) userPrompt += `\n核心创意：${coreIdea.trim()}`
-  if (oneLinePromise.trim()) userPrompt += `\n全书一句话承诺：${oneLinePromise.trim()}`
-
+  const settingBlock = buildSettingBlock({ worldBackground, genre, coreIdea, oneLinePromise, optionalTags })
+  let userPrompt = `【全书设定（必须严格遵循，不得偏离）】\n书名：${title}\n\n${settingBlock}`
+  userPrompt += CONSTRAINT_LINE
   if (characters && characters.length > 0) {
     userPrompt += `\n\n【角色列表】\n`
     characters.forEach((c) => {
@@ -470,7 +486,7 @@ export async function generateChapterContent({
   }
 
   userPrompt += `\n【本章大纲】\n第 ${chapterIndex} 章：${chapterTitle}\n本章目标：${chapterGoal}\n关键要点：\n${(chapterPoints || []).map((p) => `- ${p}`).join('\n')}`
-  userPrompt += `\n\n请撰写上述章节的正文，约 ${wordCount} 字，直接输出正文内容。`
+  userPrompt += `\n\n请严格按上述设定与本章大纲撰写正文，约 ${wordCount} 字，直接输出正文内容。`
 
   const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
     method: 'POST',
@@ -511,15 +527,23 @@ export async function generateChapterContent({
  */
 export async function runConsistencyCheck(project, opts = {}) {
   const model = resolveModel(opts.model)
-  const systemPrompt = `你是一位小说审读助手，负责检查已写正文与设定、大纲、角色是否一致。
-请根据给定的「世界观与设定」「角色列表」「大纲」以及「各章正文摘要」，找出以下类型的问题：
+  const systemPrompt = `你是一位小说审读助手，负责检查已写正文与**本书设定**（世界背景、题材、核心创意、一句话承诺、可选标签）、大纲、角色是否一致。以本书设定与标签为唯一基准，正文不得与之矛盾或偏离。
+请根据给定的「本书设定」「角色列表」「大纲」以及「各章正文摘要」，找出以下类型的问题：
 1. **时间线矛盾**（type: timeline）：前后章节时间顺序、年龄、季节等不一致。
 2. **人物行为/性格与设定冲突**（type: character）：角色言行与身份、性格、目标不符，或与角色设定矛盾。
 3. **与大纲严重偏离**（type: outline_deviation）：章节目标或关键要点未体现，或剧情走向与大纲冲突。
 请仅输出一个 JSON 对象，格式为：{"issues":[{"type":"timeline|character|outline_deviation","severity":"warning|error","chapterIndex":数字,"message":"问题描述","suggestion":"可选修改建议"},...]}
 若无问题则输出 {"issues":[]}。不要输出任何其他文字或 markdown。`
 
-  let userPrompt = `【书名】${project.title || '未命名'}\n【世界背景】${project.setting?.worldBackground ?? ''}\n【题材】${project.setting?.genre ?? ''}\n【核心创意】${project.setting?.coreIdea ?? ''}\n【全书一句话承诺】${project.oneLinePromise ?? ''}\n\n【角色列表】\n`
+  const worldBg = (project.setting?.worldBackground ?? '') + (project.setting?.worldBackgroundSub ? `（${project.setting.worldBackgroundSub}）` : '')
+  const settingBlock = buildSettingBlock({
+    worldBackground: worldBg,
+    genre: project.setting?.genre ?? '',
+    coreIdea: project.setting?.coreIdea ?? '',
+    oneLinePromise: project.oneLinePromise ?? '',
+    optionalTags: project.setting?.optionalTags ?? [],
+  })
+  let userPrompt = `【书名】${project.title || '未命名'}\n\n${settingBlock}\n\n【角色列表】\n`
   ;(project.characters || []).forEach((c) => {
     userPrompt += `- ${c.name}：${c.identity || ''}；性格：${c.personality || ''}；目标：${c.goal || ''}；与主角关系：${c.relationToProtagonist || ''}\n`
   })
