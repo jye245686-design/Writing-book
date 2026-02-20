@@ -56,6 +56,10 @@ export default function CreateOutline() {
   const [error, setError] = useState<string | null>(null)
   const [loadFailed, setLoadFailed] = useState(false)
   const [outlinePage, setOutlinePage] = useState(0)
+  /** 章数较多时展示自定义确认弹窗，避免浏览器用域名当标题 */
+  const [showLargeChapterConfirm, setShowLargeChapterConfirm] = useState(false)
+  /** 补齐章节数较多时的确认弹窗 */
+  const [showFillChaptersConfirm, setShowFillChaptersConfirm] = useState(false)
   const saveOutlineTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const projectId = projectIdFromUrl || state?.projectId
 
@@ -223,13 +227,7 @@ export default function CreateOutline() {
     }
   }
 
-  const handleGenerate = async () => {
-    if (totalChapters > LARGE_CHAPTER_THRESHOLD) {
-      const ok = window.confirm(
-        `章节数较多（${totalChapters} 章），预计耗时较长（约 30 分钟～1 小时），请勿关闭页面。是否继续？`
-      )
-      if (!ok) return
-    }
+  const doGenerate = async () => {
     setLoading(true)
     setError(null)
     setProgress(null)
@@ -256,8 +254,16 @@ export default function CreateOutline() {
     }
   }
 
-  /** 失败后点击「重试继续」：基于当前已生成的大纲与设定，从下一批继续生成 */
-  const handleRetryContinue = async () => {
+  const handleGenerate = () => {
+    if (totalChapters > LARGE_CHAPTER_THRESHOLD) {
+      setShowLargeChapterConfirm(true)
+      return
+    }
+    doGenerate()
+  }
+
+  /** 补齐章节 / 重试继续：基于当前已生成大纲与前 15 章及设定，续写到 totalChapters */
+  const doFillChapters = async () => {
     if (!outline || outline.chapters.length >= totalChapters) return
     setLoading(true)
     setError(null)
@@ -265,11 +271,25 @@ export default function CreateOutline() {
     try {
       await runBatchGeneration(outline.chapters)
     } catch (e) {
-      setError(e instanceof Error ? e.message : '继续生成失败，可再次点击重试继续')
+      setError(e instanceof Error ? e.message : '补齐失败，可再次点击补齐章节大纲')
     } finally {
       setLoading(false)
       setProgress(null)
     }
+  }
+
+  /** 失败后点击「重试继续」：同上，仅文案区分 */
+  const handleRetryContinue = () => doFillChapters()
+
+  /** 补齐章节大纲：修改章节数后点击，根据前 15 章与设定续写；若需补齐的章数较多则先弹确认 */
+  const handleFillChapters = () => {
+    if (!outline || outline.chapters.length >= totalChapters) return
+    const toAdd = totalChapters - outline.chapters.length
+    if (toAdd > LARGE_CHAPTER_THRESHOLD) {
+      setShowFillChaptersConfirm(true)
+      return
+    }
+    doFillChapters()
   }
 
   /** 保存大纲到服务端：章节数不超过 OUTLINE_SAVE_CHUNK_SIZE 时一次 PATCH，否则按片 PATCH outline-chunk 合并，保证全部保存成功 */
@@ -337,6 +357,70 @@ export default function CreateOutline() {
 
   return (
     <div className="space-y-8">
+      {showLargeChapterConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-labelledby="large-chapter-confirm-title">
+          <div className="card-flat w-full max-w-md p-6 shadow-xl">
+            <h2 id="large-chapter-confirm-title" className="page-title text-center text-lg font-semibold text-gray-900">
+              确认生成大纲
+            </h2>
+            <p className="mt-3 text-sm text-[var(--color-text-muted)] leading-relaxed">
+              章节数较多（共 {totalChapters} 章），预计耗时较长（约 30 分钟～1 小时），请勿关闭页面。是否继续？
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowLargeChapterConfirm(false)}
+                className="btn-flat"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLargeChapterConfirm(false)
+                  doGenerate()
+                }}
+                className="btn-flat btn-primary"
+              >
+                确定
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showFillChaptersConfirm && outline && outline.chapters.length < totalChapters && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-labelledby="fill-chapters-confirm-title">
+          <div className="card-flat w-full max-w-md p-6 shadow-xl">
+            <h2 id="fill-chapters-confirm-title" className="page-title text-center text-lg font-semibold text-gray-900">
+              确认补齐章节大纲
+            </h2>
+            <p className="mt-3 text-sm text-[var(--color-text-muted)] leading-relaxed">
+              将根据前 {Math.min(PREVIOUS_CHAPTERS_FOR_CONTINUITY, outline.chapters.length)} 章大纲与书名、设定续写第 {outline.chapters.length + 1} 至 {totalChapters} 章（共 {totalChapters - outline.chapters.length} 章），保持剧情一致。预计耗时较长，请勿关闭页面。是否继续？
+            </p>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={() => setShowFillChaptersConfirm(false)}
+                className="btn-flat"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowFillChaptersConfirm(false)
+                  doFillChapters()
+                }}
+                className="btn-flat btn-primary"
+              >
+                确定
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div>
         <div className="flex flex-wrap items-center gap-3">
           <Link
@@ -389,7 +473,23 @@ export default function CreateOutline() {
           >
             {loading ? '生成中…' : outline ? '重新生成大纲' : '生成大纲'}
           </button>
+          {outline && outline.chapters.length > 0 && outline.chapters.length < totalChapters && (
+            <button
+              type="button"
+              onClick={handleFillChapters}
+              disabled={loading}
+              className="btn-flat btn-primary"
+              title={`根据前 ${Math.min(PREVIOUS_CHAPTERS_FOR_CONTINUITY, outline.chapters.length)} 章与设定续写至第 ${totalChapters} 章`}
+            >
+              补齐章节大纲
+            </button>
+          )}
         </div>
+        {outline && outline.chapters.length > 0 && outline.chapters.length < totalChapters && (
+          <p className="text-sm text-[var(--color-text-muted)]">
+            当前已生成 {outline.chapters.length} 章，目标 {totalChapters} 章。可修改上方「章节数」后点击「补齐章节大纲」，将根据前 15 章内容与书名、设定续写，保持一致性。
+          </p>
+        )}
         {loading && progress && (
           <div className="space-y-2">
             <p className="text-sm text-[var(--color-text-muted)]">

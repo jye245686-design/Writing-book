@@ -4,7 +4,7 @@ import fs from 'fs'
 import dotenv from 'dotenv'
 import express from 'express'
 import cors from 'cors'
-import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, runConsistencyCheck, generateSynopsis, ALLOWED_MODELS } from './ai/deepseek.js'
+import { suggestTitles, generateOutline, generateOutlineBatch, suggestCharacters, generateChapterContent, summarizeChapterEnding, summarizeChapterEndingFallback, runConsistencyCheck, generateSynopsis, ALLOWED_MODELS } from './ai/deepseek.js'
 import { createProject, readProject, writeProject, listProjects } from './store/projects.js'
 import { sendVerificationCode, loginWithCode, loginWithPassword, registerWithPassword, requireAuth } from './auth.js'
 import { getPool, ensureSchema } from './db-mysql.js'
@@ -191,7 +191,7 @@ const outlineBatchHandler = async (req, res) => {
 app.post('/api/ai/outline/generate-batch', outlineBatchHandler)
 app.post('/api/ai/outline/generate-batch/', outlineBatchHandler)
 
-/** 前文摘要：从已持久化的章节中取每章末尾，总长上限约 3000 字 */
+/** 前文摘要：从已持久化的章节中取每章末尾，总长上限约 3000 字（用于一致性检查等） */
 function buildPreviousSummaryFromProject(project, upToChapterIndex, tailCharsPerChapter = 600, maxTotalChars = 3000) {
   const parts = []
   let total = 0
@@ -209,6 +209,16 @@ function buildPreviousSummaryFromProject(project, upToChapterIndex, tailCharsPer
     total += tail.length
   }
   return parts.join('\n---\n')
+}
+
+/** 上一章衔接用：优先用 AI 保存的结尾摘要，无则用上一章正文末尾；第一章返回空 */
+function getPreviousChapterEndingContext(project, chapterIndex, tailChars = 1500) {
+  if (chapterIndex <= 1) return ''
+  const ch = (project.chapters || {})[String(chapterIndex - 1)]
+  if (!ch?.content) return ''
+  const summary = ch.endingSummary && String(ch.endingSummary).trim()
+  if (summary) return `【上一章结尾摘要，供本章开头衔接】\n${summary}`
+  return ch.content.slice(-tailChars)
 }
 
 /** 仅当项目存在且属于当前用户时返回 project，否则返回 null */
@@ -422,7 +432,22 @@ app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async
     }
     const { wordCount: rawWordCount } = req.body || {}
     const wordCount = Math.min(8000, Math.max(500, Number(rawWordCount) || 3000))
-    const previousSummary = buildPreviousSummaryFromProject(project, chapterIndex)
+    if (chapterIndex > 1) {
+      const prevCh = (project.chapters || {})[String(chapterIndex - 1)]
+      if (prevCh?.content && !(prevCh.endingSummary && String(prevCh.endingSummary).trim())) {
+        try {
+          const fallback = await summarizeChapterEndingFallback(prevCh.content)
+          if (fallback) {
+            prevCh.endingSummary = fallback
+            project.updatedAt = new Date().toISOString()
+            await writeProject(project)
+          }
+        } catch (err) {
+          console.error('[summarizeChapterEndingFallback]', err)
+        }
+      }
+    }
+    const previousSummary = getPreviousChapterEndingContext(project, chapterIndex, 1500)
     const result = await generateChapterContent({
       title: project.title,
       worldBackground: worldBackgroundForAi(project.setting.worldBackground, project.setting.worldBackgroundSub),
@@ -438,11 +463,25 @@ app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async
       previousSummary,
       wordCount,
     })
+    let endingSummary = ''
+    try {
+      endingSummary = await summarizeChapterEnding(result.content, { chapterIndex }) || ''
+    } catch (err) {
+      console.error('[summarizeChapterEnding]', err)
+    }
+    if (!endingSummary) {
+      try {
+        endingSummary = await summarizeChapterEndingFallback(result.content) || ''
+      } catch (err) {
+        console.error('[summarizeChapterEndingFallback]', err)
+      }
+    }
     project.chapters = project.chapters || {}
     project.chapters[String(chapterIndex)] = {
       content: result.content,
       wordCount,
       status: 'draft',
+      ...(endingSummary && { endingSummary }),
     }
     project.updatedAt = new Date().toISOString()
     await writeProject(project)
@@ -458,29 +497,31 @@ app.post('/api/projects/:id/chapters/:chapterIndex/generate', requireAuth, async
   }
 })
 
-/** 更新章节（正文或状态如锁定）；需登录且项目归属当前用户 */
+/** 更新章节（正文、状态或结尾摘要）；需登录且项目归属当前用户 */
 app.patch('/api/projects/:id/chapters/:chapterIndex', requireAuth, async (req, res) => {
   const project = await getProjectForUser(req.params.id, req.user.id)
   if (!project) return res.status(404).json({ error: '项目不存在' })
   const chapterIndex = String(req.params.chapterIndex)
-  const { content, status } = req.body || {}
+  const { content, status, endingSummary } = req.body || {}
   project.chapters = project.chapters || {}
 
   if (!project.chapters[chapterIndex]) {
     const outline = project.outline || { chapters: [] }
     const inOutline = outline.chapters.some((c) => String(c.chapterIndex) === chapterIndex)
     if (!inOutline) return res.status(404).json({ error: '该章节不在大纲中' })
-    if (content === undefined && status === undefined) {
+    if (content === undefined && status === undefined && endingSummary === undefined) {
       return res.status(404).json({ error: '该章节尚未生成' })
     }
     project.chapters[chapterIndex] = {
       content: content !== undefined ? String(content) : '',
       wordCount: 0,
       status: status === 'locked' || status === 'draft' ? status : 'draft',
+      ...(endingSummary !== undefined && { endingSummary: String(endingSummary) }),
     }
   } else {
     if (content !== undefined) project.chapters[chapterIndex].content = String(content)
     if (status === 'locked' || status === 'draft') project.chapters[chapterIndex].status = status
+    if (endingSummary !== undefined) project.chapters[chapterIndex].endingSummary = String(endingSummary)
   }
 
   project.updatedAt = new Date().toISOString()

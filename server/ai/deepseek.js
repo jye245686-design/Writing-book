@@ -365,7 +365,7 @@ export async function suggestCharacters({
   model: modelOverride,
 }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一个小说角色设计助手。根据书名与**本书设定**（世界背景、题材、核心创意、一句话承诺、可选标签）生成该小说主要角色列表（3～8 人）。要求：
+  const systemPrompt = `你是一个资深网络小说作者/编辑/读者。根据书名与**本书设定**（世界背景、题材、核心创意、一句话承诺、可选标签）生成该小说主要角色列表（3～8 人）。要求：
 - 角色身份、性格、目标与关系必须严格贴合本书设定与可选标签，不得出现与设定矛盾的设定；
 - 若含可选标签（如系统流、重生、甜宠、逆袭等），角色设定与关系应能支撑这些标签的剧情发展；
 - 输出一个 JSON 对象，格式为：{"characters": [{"name": "姓名", "identity": "身份", "personality": "性格", "goal": "目标/动机", "relationToProtagonist": "与主角关系", "speechStyle": "口头禅或说话风格"}, ...]}；每个角色至少包含 name；
@@ -459,7 +459,8 @@ export async function generateChapterContent({
   model: modelOverride,
 }) {
   const model = resolveModel(modelOverride)
-  const systemPrompt = `你是一位小说正文撰写助手。请根据给定的**全书设定**、角色列表、前文摘要与本章大纲，撰写本章正文。要求：
+  const isFirstChapter = chapterIndex === 1
+  const systemPrompt = `你是一位资深网络小说作者/编辑/读者。请根据给定的**全书设定**、角色列表与本章大纲撰写本章正文。要求：
 - 正文必须严格贴合【全书设定】与【本章大纲】，不得自创与设定矛盾的设定、词汇或剧情；角色言行必须符合角色设定；
 - 若含可选标签，正文中须体现相应元素（如系统流有面板/提示、重生有对未来的利用、甜宠有情感互动、逆袭有成长节奏等），风格与爽点与标签一致；
 - 仅输出本章正文内容，不要输出章节标题或「第X章」等标记，不要输出任何解释或备注；
@@ -481,12 +482,17 @@ export async function generateChapterContent({
     })
   }
 
-  if (previousSummary.trim()) {
-    userPrompt += `\n【前文摘要（供衔接用）】\n${previousSummary.trim()}\n`
+  if (isFirstChapter) {
+    userPrompt += `\n【本章大纲】\n第 ${chapterIndex} 章：${chapterTitle}\n本章目标：${chapterGoal}\n关键要点：\n${(chapterPoints || []).map((p) => `- ${p}`).join('\n')}`
+    userPrompt += `\n\n【写作要求】本章为第一章，无需衔接前文。紧贴上述本章大纲，减少环境描写与背景铺垫，直接开门写剧情。约 ${wordCount} 字，直接输出正文内容。`
+  } else {
+    if (previousSummary.trim()) {
+      userPrompt += `\n【上一章结尾】\n${previousSummary.trim()}\n`
+      userPrompt += `\n请从以上上一章结尾自然衔接写本章开头，避免逻辑断层；本章开头需与上一章结尾在时间、场景、人物状态上连贯。\n`
+    }
+    userPrompt += `\n【本章大纲】\n第 ${chapterIndex} 章：${chapterTitle}\n本章目标：${chapterGoal}\n关键要点：\n${(chapterPoints || []).map((p) => `- ${p}`).join('\n')}`
+    userPrompt += `\n\n请根据上一章结尾与本章大纲撰写正文，约 ${wordCount} 字，直接输出正文内容。`
   }
-
-  userPrompt += `\n【本章大纲】\n第 ${chapterIndex} 章：${chapterTitle}\n本章目标：${chapterGoal}\n关键要点：\n${(chapterPoints || []).map((p) => `- ${p}`).join('\n')}`
-  userPrompt += `\n\n请严格按上述设定与本章大纲撰写正文，约 ${wordCount} 字，直接输出正文内容。`
 
   const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
     method: 'POST',
@@ -517,6 +523,84 @@ export async function generateChapterContent({
   }
 
   return { content }
+}
+
+/**
+ * 根据本章正文生成「本章结尾摘要」，供下一章衔接用；仅分析章节末尾部分以控制 token
+ * @param {string} content - 章节正文（可只传末尾约 2500 字）
+ * @param {{ chapterIndex?: number, model?: string }} [opts] - chapterIndex 为 1 时使用第一章专用 prompt
+ * @returns {Promise<string>} 结尾摘要，约 200～400 字
+ */
+export async function summarizeChapterEnding(content, opts = {}) {
+  if (!content || !content.trim()) return ''
+  const model = resolveModel(opts.model)
+  const isFirstChapter = opts.chapterIndex === 1
+  const tail = content.length > 2600 ? content.slice(-2600) : content
+  const systemPrompt = isFirstChapter
+    ? `你是一位小说编辑助手。本章为全书第一章。请根据给定的章节正文末尾，用 200～400 字概括本章结尾时的状态，供第二章开头衔接使用。摘要须包含：此时场景与时间、主要人物所在位置与状态、以及留下的悬念或下文伏笔。只输出摘要正文，不要输出「摘要：」等前缀或任何解释。`
+    : `你是一位小说编辑助手。请根据给定的章节正文（可能仅为末尾部分），用 200～400 字概括本章结尾，供下一章开头衔接使用。摘要须包含：此时场景与时间、主要人物所在位置与状态、情节收束或留下的悬念。只输出摘要正文，不要输出「摘要：」等前缀或任何解释。`
+
+  const userHint = isFirstChapter ? '（本章为第一章，请概括结尾状态供第二章衔接）' : ''
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `【章节正文末尾】\n\n${tail}\n\n请概括本章结尾（200～400 字）${userHint}，直接输出摘要。` },
+      ],
+      max_tokens: 600,
+      temperature: 0.3,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let text = (message?.content?.trim() || '').replace(/^摘要[：:]\s*/i, '').trim()
+  const reasoning = message?.reasoning_content?.trim()
+  if (!text && reasoning) text = reasoning.replace(/^摘要[：:]\s*/i, '').trim()
+  return text || ''
+}
+
+/**
+ * 轻量补全：用上一章末尾约 800 字生成一两句衔接用概括（摘要失败或未保存时使用）
+ * @param {string} content - 章节正文（可只传末尾约 800 字）
+ * @param {{ model?: string }} [opts]
+ * @returns {Promise<string>} 一两句话的结尾概括，供下一章衔接
+ */
+export async function summarizeChapterEndingFallback(content, opts = {}) {
+  if (!content || !content.trim()) return ''
+  const model = resolveModel(opts.model)
+  const tail = content.length > 900 ? content.slice(-900) : content
+  const systemPrompt = `你是一位小说编辑助手。请根据给定的章节正文末尾，用一两句话（约 50～150 字）概括本章结尾：此时场景、主要人物状态、以及留给下文的悬念或收束。供下一章开头衔接用。只输出概括句，不要「概括：」等前缀。`
+
+  const response = await fetchWithRetry(`${DEEPSEEK_BASE}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${getApiKey()}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: `【章节正文末尾】\n\n${tail}\n\n请用一两句话概括本章结尾，直接输出。` },
+      ],
+      max_tokens: 200,
+      temperature: 0.3,
+    }),
+  })
+
+  const data = await response.json()
+  const message = data?.choices?.[0]?.message
+  let text = (message?.content?.trim() || '').replace(/^概括[：:]\s*/i, '').trim()
+  const reasoning = message?.reasoning_content?.trim()
+  if (!text && reasoning) text = reasoning.replace(/^概括[：:]\s*/i, '').trim()
+  return text || ''
 }
 
 /**
